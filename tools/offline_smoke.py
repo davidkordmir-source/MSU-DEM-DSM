@@ -18,6 +18,7 @@ enable_offline_mode()
 
 import numpy as np
 import rasterio
+import shapefile
 from rasterio.transform import from_origin
 
 from app.demo import make_demo
@@ -63,6 +64,30 @@ with tempfile.TemporaryDirectory() as temp:
     assert report["resampling"] == "bilinear"
     with rasterio.open(path / "resolution-output/height.tif") as output:
         np.testing.assert_allclose(output.read(1), 50)
+    # Exercise bundled PyShp, GEOS and raster masking together.
+    aoi = path / "aoi"
+    aoi.mkdir()
+    with shapefile.Writer(str(aoi / "boundary")) as writer:
+        writer.field("id", "N")
+        writer.poly(
+            [
+                [
+                    (500005, 4099995),
+                    (500010, 4099995),
+                    (500010, 4100000),
+                    (500005, 4100000),
+                    (500005, 4099995),
+                ][::-1]
+            ]
+        )
+        writer.record(1)
+    (aoi / "boundary.prj").write_text(rasterio.CRS.from_epsg(32639).to_wkt())
+    report = process_rasters(coarse, fine, path / "aoi-output", threshold=30, aoi_directory=aoi)
+    assert report["selected_pixels"] == 100
+    assert report["aoi"]["feature_count"] == 1
+    with rasterio.open(path / "aoi-output/height.tif") as output:
+        assert output.shape == (10, 10)
+        np.testing.assert_allclose(output.read(1), 50)
     # Exercise offline PROJ using bundled coordinate databases.
     from rasterio.warp import transform
 
@@ -78,7 +103,13 @@ with tempfile.TemporaryDirectory() as temp:
                 "rasterio": rasterio.__version__,
                 "resources": resource_budget(),
                 "external_connections": "blocked",
-                "checks": ["negative elevations", "10m vs 0.5m", "GeoTIFF output", "offline CRS conversion"],
+                "checks": [
+                    "negative elevations",
+                    "10m vs 0.5m",
+                    "shapefile AOI",
+                    "GeoTIFF output",
+                    "offline CRS conversion",
+                ],
             }
         )
     )

@@ -1,4 +1,5 @@
 import json
+from io import BytesIO
 from zipfile import ZipFile
 
 import numpy as np
@@ -7,6 +8,7 @@ import rasterio
 from rasterio.transform import from_bounds, from_origin
 from rasterio.warp import transform_bounds
 
+from app.downloads import stream_results
 from app.processing import ProcessingError, process_rasters
 
 
@@ -27,7 +29,7 @@ def test_below_sea_level_and_strict_boundary(raster, tmp_path):
     assert report["selected_area_m2"] == 2
     assert report["resampling"] == "none"
     assert np.isnan(read(out, "extracted")[0, 1])
-    with ZipFile(out / "results.zip") as archive:
+    with ZipFile(BytesIO(b"".join(stream_results(out)))) as archive:
         assert set(archive.namelist()) == {"height.tif", "extracted.tif", "mask.tif", "report.json"}
         assert json.loads(archive.read("report.json"))["selected_pixels"] == 2
 

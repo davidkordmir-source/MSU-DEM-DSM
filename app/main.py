@@ -13,16 +13,18 @@ from typing import Annotated
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.aoi import EXTENSIONS, MAX_AOI_BYTES
 from app.demo import make_demo
+from app.desktop import pick_output_directory, pick_raster
+from app.downloads import RESULT_FILES, stream_results
 from app.processing import ProcessingError, process_rasters
 from app.resources import resource_budget
 
 BASE = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("MSU_DATA_DIR", BASE.parent / ".data")).resolve()
-MAX_FILE_BYTES = 512 * 1024**2
 RETENTION_SECONDS = 24 * 3600
 FILES = {
     "height.tif": "image/tiff",
@@ -33,6 +35,7 @@ FILES = {
     "height.png": "image/png",
     "mask.png": "image/png",
     "surface.png": "image/png",
+    "aoi.png": "image/png",
 }
 jobs: dict[str, dict] = {}
 lock = threading.RLock()
@@ -53,9 +56,6 @@ app = FastAPI(title="MSU Terrain · DEM / DSM", lifespan=lifespan, docs_url=None
 
 @app.middleware("http")
 async def limits_and_headers(request: Request, call_next):
-    length = request.headers.get("content-length")
-    if length and (not length.isdigit() or int(length) > 2 * MAX_FILE_BYTES + 1024**2):
-        return JSONResponse({"detail": "حداکثر حجم هر فایل ۵۱۲ مگابایت است."}, status_code=413)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "same-origin"
@@ -68,8 +68,89 @@ async def limits_and_headers(request: Request, call_next):
 
 
 @app.get("/api/health")
-def health():
-    return {"status": "ok", "resources": resource_budget(), "max_file_mb": MAX_FILE_BYTES // 1024**2}
+def health(request: Request):
+    return {
+        "status": "ok",
+        "resources": resource_budget(),
+        "max_file_mb": None,
+        "desktop_session": getattr(request.app.state, "desktop_session", None),
+    }
+
+
+@app.post("/api/desktop/exit")
+async def desktop_exit(request: Request):
+    import asyncio
+    import secrets
+
+    session = getattr(request.app.state, "desktop_session", None)
+    supplied = request.headers.get("X-MSU-Session", "")
+    if not session or not secrets.compare_digest(session, supplied):
+        raise HTTPException(403, "این درخواست فقط از پنجرهٔ خود برنامه مجاز است.")
+    asyncio.get_running_loop().call_later(0.3, request.app.state.request_exit)
+    return {"status": "closing"}
+
+
+def _require_desktop(request: Request):
+    import secrets
+
+    session = getattr(request.app.state, "desktop_session", None)
+    if not session or not secrets.compare_digest(session, request.headers.get("X-MSU-Session", "")):
+        raise HTTPException(403, "انتخاب مستقیم فایل فقط از پنجرهٔ خود برنامه مجاز است.")
+
+
+@app.post("/api/desktop/pick-raster")
+def select_local_raster(request: Request, kind: str = "dem"):
+    _require_desktop(request)
+    if kind not in ("dem", "dsm"):
+        raise HTTPException(422, "نوع مدل ارتفاعی معتبر نیست.")
+    try:
+        path = pick_raster("انتخاب مدل زمین DEM" if kind == "dem" else "انتخاب مدل سطح DSM")
+        if path is None:
+            return {"file": None}
+        if path.suffix.lower() not in (".tif", ".tiff") or not path.is_file():
+            raise HTTPException(422, "یک فایل TIF یا TIFF معتبر انتخاب کنید.")
+        size = path.stat().st_size
+        token = uuid4().hex
+        with lock:
+            if not hasattr(request.app.state, "local_rasters"):
+                request.app.state.local_rasters = {}
+            registry = request.app.state.local_rasters
+            if len(registry) >= 64:
+                registry.pop(next(iter(registry)))
+            registry[token] = path
+        return {"file": {"localToken": token, "name": path.name, "size": size}}
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+def _local_path(request: Request, token: str) -> Path:
+    _require_desktop(request)
+    path = getattr(request.app.state, "local_rasters", {}).get(token)
+    if path is None or not path.is_file():
+        raise HTTPException(422, "فایل انتخاب‌شده در دسترس نیست؛ دوباره آن را انتخاب کنید.")
+    return path
+
+
+@app.post("/api/desktop/pick-output")
+def select_output_directory(request: Request):
+    _require_desktop(request)
+    try:
+        path = pick_output_directory()
+        if path is None:
+            return {"folder": None}
+        if not path.is_dir():
+            raise HTTPException(422, "پوشه در دسترس نیست.")
+        token = uuid4().hex
+        with lock:
+            if not hasattr(request.app.state, "output_folders"):
+                request.app.state.output_folders = {}
+            registry = request.app.state.output_folders
+            if len(registry) >= 64:
+                registry.pop(next(iter(registry)))
+            registry[token] = path
+        return {"folder": {"token": token, "path": str(path), "free_bytes": shutil.disk_usage(path).free}}
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 def _cleanup() -> None:
@@ -107,15 +188,21 @@ def _update(job_id: str, **changes):
         jobs[job_id].update(changes)
 
 
-def _run(job_id: str, directory: Path, options: dict, demo: bool = False):
+def _run(job_id: str, directory: Path, options: dict, demo: bool = False, sources=None, destination=None):
     _update(job_id, status="processing", message="آماده‌سازی")
+    output = destination / f"MSU-{job_id}" if destination else directory / "output"
+    own_output = False
     try:
+        output.mkdir(exist_ok=False)
+        own_output = True
+        _update(job_id, output_directory=str(output), permanent_output=destination is not None)
         if demo:
             make_demo(directory)
+        dem_input, dsm_input = sources or (directory / "dem.tif", directory / "dsm.tif")
         report = process_rasters(
-            directory / "dem.tif",
-            directory / "dsm.tif",
-            directory / "output",
+            dem_input,
+            dsm_input,
+            output,
             progress=lambda pct, msg: _update(job_id, progress=pct, message=msg),
             **options,
         )
@@ -126,14 +213,17 @@ def _run(job_id: str, directory: Path, options: dict, demo: bool = False):
             )
     except ProcessingError as exc:
         _update(job_id, status="error", message=str(exc))
-        shutil.rmtree(directory / "output", ignore_errors=True)
+        if own_output:
+            shutil.rmtree(output, ignore_errors=True)
     except Exception:
         logger.exception("Raster processing failed for job %s", job_id)
         _update(job_id, status="error", message="پردازش انجام نشد. سلامت فایل و فضای دیسک را بررسی کنید.")
-        shutil.rmtree(directory / "output", ignore_errors=True)
+        if own_output:
+            shutil.rmtree(output, ignore_errors=True)
     finally:
         for name in ("dem.tif", "dsm.tif"):
             (directory / name).unlink(missing_ok=True)
+        shutil.rmtree(directory / "aoi", ignore_errors=True)
 
 
 def _options(
@@ -156,49 +246,96 @@ def _options(
     }
 
 
-async def _save_upload(upload: UploadFile, path: Path):
+async def _save_upload(upload: UploadFile, path: Path, limit=None):
     size = 0
     with path.open("wb") as target:
         while chunk := await upload.read(1024**2):
             size += len(chunk)
-            if size > MAX_FILE_BYTES:
-                raise HTTPException(413, "حداکثر حجم هر فایل ۵۱۲ مگابایت است.")
+            if limit is not None and size > limit:
+                raise HTTPException(413, "حجم مجموع فایل‌های محدوده بیش از ۵۰ مگابایت است.")
             target.write(chunk)
     if size == 0:
         raise HTTPException(422, "فایل خالی است.")
+    return size
+
+
+async def _save_aoi(uploads: list[UploadFile], directory: Path):
+    if len(uploads) > 8:
+        raise HTTPException(422, "یک ZIP یا اجزای یک شیپ‌فایل را انتخاب کنید.")
+    directory.mkdir()
+    names = set()
+    remaining = MAX_AOI_BYTES
+    for upload in uploads:
+        name = Path((upload.filename or "").replace("\\", "/")).name
+        if Path(name).suffix.lower() not in EXTENSIONS | {".zip"} or name.casefold() in names:
+            raise HTTPException(422, "پسوند یا نام فایل محدوده معتبر نیست.")
+        names.add(name.casefold())
+        remaining -= await _save_upload(upload, directory / name, limit=remaining)
 
 
 @app.post("/api/jobs", status_code=202)
 async def create_job(
     request: Request,
-    dem: Annotated[UploadFile, File()],
-    dsm: Annotated[UploadFile, File()],
+    output_token: Annotated[str | None, Form()] = None,
+    dem: Annotated[UploadFile | None, File()] = None,
+    dsm: Annotated[UploadFile | None, File()] = None,
+    dem_token: Annotated[str | None, Form()] = None,
+    dsm_token: Annotated[str | None, Form()] = None,
     threshold: Annotated[float, Form()] = 30,
     inclusive: Annotated[bool, Form()] = False,
     dem_unit: Annotated[str, Form()] = "m",
     dsm_unit: Annotated[str, Form()] = "m",
     resampling: Annotated[str, Form()] = "auto",
     same_datum: Annotated[bool, Form()] = False,
+    aoi_files: Annotated[list[UploadFile] | None, File()] = None,
 ):
     options = _options(threshold, inclusive, dem_unit, dsm_unit, resampling, same_datum)
-    names = tuple(Path((f.filename or "").replace("\\", "/")).name[:180] for f in (dem, dsm))
+    destination = None
+    if output_token:
+        _require_desktop(request)
+        destination = getattr(request.app.state, "output_folders", {}).get(output_token)
+        if destination is None or not destination.is_dir():
+            raise HTTPException(422, "پوشهٔ خروجی در دسترس نیست؛ دوباره انتخاب کنید.")
+    inputs = []
+    for upload, token in ((dem, dem_token), (dsm, dsm_token)):
+        if bool(upload) == bool(token):
+            raise HTTPException(422, "برای DEM و DSM هر کدام یک فایل انتخاب کنید.")
+        inputs.append(_local_path(request, token) if token else upload)
+    names = tuple(
+        item.name if isinstance(item, Path) else Path((item.filename or "").replace("\\", "/")).name[:180]
+        for item in inputs
+    )
     if any(Path(name).suffix.lower() not in (".tif", ".tiff") for name in names):
         raise HTTPException(422, "فقط فایل GeoTIFF با پسوند tif یا tiff قابل استفاده است.")
     options["filenames"] = names
     job_id, directory = _reserve()
     try:
-        await _save_upload(dem, directory / "dem.tif")
-        await _save_upload(dsm, directory / "dsm.tif")
+        sources = []
+        for kind, item in zip(("dem", "dsm"), inputs, strict=True):
+            if isinstance(item, Path):
+                sources.append(item)
+            else:
+                target = directory / f"{kind}.tif"
+                await _save_upload(item, target)
+                sources.append(target)
+        if aoi_files:
+            await _save_aoi(aoi_files, directory / "aoi")
+            options["aoi_directory"] = directory / "aoi"
         _update(job_id, status="queued", message="در صف پردازش")
-        request.app.state.executor.submit(_run, job_id, directory, options)
+        request.app.state.executor.submit(
+            _run, job_id, directory, options, sources=tuple(sources), destination=destination
+        )
     except BaseException:
         shutil.rmtree(directory, ignore_errors=True)
         with lock:
             jobs.pop(job_id, None)
         raise
     finally:
-        await dem.close()
-        await dsm.close()
+        for upload in (dem, dsm):
+            if upload:
+                await upload.close()
+        for upload in aoi_files or []:
+            await upload.close()
     return {"id": job_id}
 
 
@@ -232,7 +369,16 @@ def download(job_id: str, filename: str):
     job = get_job(job_id)
     if job["status"] != "complete" or filename not in FILES:
         raise HTTPException(404, "خروجی هنوز آماده نیست.")
-    path = DATA / job_id / "output" / filename
+    directory = Path(job.get("output_directory", DATA / job_id / "output"))
+    if filename == "results.zip":
+        if not all((directory / name).is_file() for name in RESULT_FILES):
+            raise HTTPException(404, "فایل خروجی در دسترس نیست.")
+        return StreamingResponse(
+            stream_results(directory),
+            media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="results.zip"'},
+        )
+    path = directory / filename
     if not path.is_file():
         raise HTTPException(404, "فایل خروجی در دسترس نیست.")
     return FileResponse(

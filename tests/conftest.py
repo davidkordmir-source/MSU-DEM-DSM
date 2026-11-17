@@ -3,6 +3,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 import rasterio
+import shapefile
+from rasterio.crs import CRS
 from rasterio.transform import from_origin
 
 
@@ -31,5 +33,39 @@ def raster(tmp_path):
             if mask is not None:
                 dst.write_mask(np.asarray(mask, dtype="uint8"))
         return Path(path)
+
+    return create
+
+
+@pytest.fixture
+def aoi(tmp_path):
+    counter = 0
+
+    def create(polygons, *, crs="EPSG:32639", zipped=False):
+        nonlocal counter
+        from zipfile import ZipFile
+
+        from shapely.geometry.polygon import orient
+
+        counter += 1
+        directory = tmp_path / f"aoi-{counter}"
+        directory.mkdir()
+        with shapefile.Writer(str(directory / "boundary"), shapeType=shapefile.POLYGON) as writer:
+            writer.field("ID", "N")
+            for i, polygon in enumerate(polygons):
+                polygon = orient(polygon, sign=-1)
+                writer.poly(
+                    [list(polygon.exterior.coords), *[list(ring.coords) for ring in polygon.interiors]]
+                )
+                writer.record(i)
+        (directory / "boundary.prj").write_text(CRS.from_user_input(crs).to_wkt())
+        if zipped:
+            archive_dir = tmp_path / f"zipped-{counter}"
+            archive_dir.mkdir()
+            with ZipFile(archive_dir / "area.zip", "w") as archive:
+                for path in directory.iterdir():
+                    archive.write(path, "folder/" + path.name)
+            return archive_dir
+        return directory
 
     return create

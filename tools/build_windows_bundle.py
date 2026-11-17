@@ -64,6 +64,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache", type=Path, default=ROOT / "build/artifacts")
     parser.add_argument("--output", type=Path, default=ROOT / "downloads/MSU-Terrain-Windows-x64.zip")
+    parser.add_argument("--no-archive", action="store_true", help="Prepare payload for the desktop installer")
     args = parser.parse_args()
     args.cache.mkdir(parents=True, exist_ok=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -79,6 +80,9 @@ def main():
     shutil.copytree(ROOT / "app", bundle / "app", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     for filename in ("run_offline.py", "Start-MSU-Terrain.cmd", "README.md"):
         shutil.copy2(ROOT / filename, bundle / filename)
+    launcher_exe = ROOT / "build/launcher/MSU-Terrain.exe"
+    if launcher_exe.exists():
+        shutil.copy2(launcher_exe, bundle / launcher_exe.name)
     shutil.copy2(ROOT / "packaging/windows-lock.json", bundle / "DEPENDENCIES.json")
     shutil.copy2(ROOT / "tools/offline_smoke.py", bundle / "offline_smoke.py")
     # CMD uses Windows line endings regardless of the build machine.
@@ -86,13 +90,17 @@ def main():
     launcher.write_bytes(launcher.read_text().replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8"))
     (bundle / "START-HERE.txt").write_text(
         "MSU Terrain - Windows 10/11 x64 - Fully offline\n\n"
-        "1. Extract ALL files from the ZIP to a writable folder.\n"
-        "2. Double-click Start-MSU-Terrain.cmd.\n"
-        "3. Your browser opens the local application. Keep the console window open.\n"
-        "4. Close the console, or press Ctrl+C, to stop.\n\n"
+        "Installed edition: open MSU Terrain from the Desktop or Start menu.\n"
+        "MSU-Terrain.exe opens a separate Edge/Chrome app window; use Exit to stop.\n"
+        "Portable/source alternative: extract ALL files and open Start-MSU-Terrain.cmd.\n"
+        "For that alternative, keep its console open and use Ctrl+C to stop.\n\n"
         "No Python installation, pip, uv, account, Internet, or administrator access is required.\n"
         "A local browser (Edge, Chrome or Firefox) is required.\n"
-        "DEM/DSM files remain on your computer. Results are written to .data.\n"
+        "Click DEM/DSM in the desktop edition to read TIF/BigTIFF directly from disk.\n"
+        "There is no fixed raster file-size or pixel-count cap. Available disk/RAM still apply.\n"
+        "Optional area: one ZIP containing SHP+SHX+DBF+PRJ, or select those files together.\n"
+        "Installed results: %LOCALAPPDATA%\\MSU Terrain\\results; portable results: .data.\n"
+        "Uninstall preserves your original inputs, downloaded outputs and application data.\n"
         "All runtimes, GDAL/PROJ data, dependencies, scripts and fonts are bundled.\n"
         "See README.md for the Persian user guide.\n",
         encoding="utf-8",
@@ -103,6 +111,9 @@ def main():
         if path.is_file()
     }
     (bundle / "MANIFEST.sha256.json").write_text(json.dumps(checksums, indent=2), encoding="utf-8")
+    if args.no_archive:
+        print(json.dumps({"bundle": str(bundle), "bundled_files": len(checksums)}))
+        return
     with ZipFile(args.output, "w", ZIP_DEFLATED, compresslevel=9) as archive:
         for path in sorted(bundle.rglob("*")):
             if path.is_file():

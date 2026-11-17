@@ -88,6 +88,11 @@
       "sha256": "ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4"
     },
     {
+      "name": "pyshp-2.4.2-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/bd/22/ffcd94c7d57cb5dc0c45d0a158237f4c991ab3e187a75842e04ea3c94f6c/pyshp-2.4.2-py2.py3-none-any.whl",
+      "sha256": "7a013b5e8333f5923a9eb012e2048ae15b3399f11abf2e0044b10176decbd68a"
+    },
+    {
       "name": "python_multipart-0.0.33-py3-none-any.whl",
       "url": "https://files.pythonhosted.org/packages/dd/1b/6b1b4164ec734cac911460ab599bfbe46afedd42c5c9627fe4235942c314/python_multipart-0.0.33-py3-none-any.whl",
       "sha256": "8f16c07b36add9da6b2ee87d3efcaf0a45a6de9c3d0a5dd94e9ccf7675a7bc45"
@@ -96,6 +101,11 @@
       "name": "rasterio-1.5.2-cp312-cp312-win_amd64.whl",
       "url": "https://files.pythonhosted.org/packages/d4/b7/91643e597cd59c7c74fa6ae1b5f48a6baf04a8b457434e80059fca8c392d/rasterio-1.5.2-cp312-cp312-win_amd64.whl",
       "sha256": "508d8ca45893fea9785128b6206e0347300d015a7dc453822f9d25a376aa3754"
+    },
+    {
+      "name": "shapely-2.2.0-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/f6/26/ba9192f0a72c830aa8cc1c61e207ada57cc54b7de81668b1836f575ee717/shapely-2.2.0-cp312-cp312-win_amd64.whl",
+      "sha256": "90895df6542ae039fc6557dec6194e3509e883fbd6f5788e3c3e7a38fe46b257"
     },
     {
       "name": "starlette-1.10.0-py3-none-any.whl",

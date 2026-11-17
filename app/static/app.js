@@ -3,8 +3,11 @@ import { RasterViewer } from './viewer.js';
 const $ = id => document.getElementById(id);
 const number = (value, digits = 1) => value == null ? '—' : new Intl.NumberFormat('fa-IR', { maximumFractionDigits: digits }).format(value);
 const files = { dem: null, dsm: null };
+let aoiFiles = [];
 let busy = false;
 let completed = false;
+let desktopSession = null;
+let outputFolder = null;
 const viewer = new RasterViewer($('map-canvas'), $('renderer-status'));
 
 function showError(message) {
@@ -22,14 +25,14 @@ function setFile(kind, file) {
     showError('فایل باید GeoTIFF با پسوند tif یا tiff باشد.');
     return;
   }
-  if (file && (file.size > 512 * 1024 ** 2 || !file.size)) {
-    showError('فایل باید غیرخالی و کوچک‌تر از ۵۱۲ مگابایت باشد.');
+  if (file && !file.size) {
+    showError('فایل انتخاب‌شده خالی است.');
     return;
   }
   files[kind] = file;
   $(`${kind}-name`).textContent = file?.name || (kind === 'dem' ? 'فایل زمین را انتخاب کنید' : 'فایل سطح را انتخاب کنید');
   $(`${kind}-name`).dir = file ? 'auto' : 'rtl';
-  $(`${kind}-size`).textContent = file ? `${number(file.size / 1024 ** 2, 2)} مگابایت · آمادهٔ ارسال` : 'یا فایل را اینجا رها کنید';
+  $(`${kind}-size`).textContent = file ? `${number(file.size / 1024 ** 2, 2)} مگابایت · ${file.localToken ? 'خواندن مستقیم از دیسک' : 'آمادهٔ پردازش'}` : 'یا فایل را اینجا رها کنید';
   $(`${kind}-zone`).classList.toggle('has-file', !!file);
   $(`${kind}-remove`).hidden = !file;
   if (!file) $(`${kind}-file`).value = '';
@@ -39,6 +42,14 @@ function setFile(kind, file) {
 
 for (const kind of ['dem', 'dsm']) {
   const zone = $(`${kind}-zone`);
+  zone.addEventListener('click', async event => {
+    if (!desktopSession || busy) return;
+    event.preventDefault();
+    try {
+      const result = await responseJSON(await fetch(`/api/desktop/pick-raster?kind=${kind}`, { method: 'POST', headers: { 'X-MSU-Session': desktopSession } }));
+      if (result.file) setFile(kind, result.file);
+    } catch (error) { showError(error.message); }
+  });
   $(`${kind}-file`).addEventListener('change', event => setFile(kind, event.target.files[0]));
   $(`${kind}-remove`).addEventListener('click', () => setFile(kind, null));
   zone.addEventListener('dragover', event => { event.preventDefault(); if (!busy) zone.classList.add('dragover'); });
@@ -49,6 +60,47 @@ for (const kind of ['dem', 'dsm']) {
     setFile(kind, event.dataTransfer.files[0]);
   });
 }
+
+function setAoi(inputFiles) {
+  if (busy) return;
+  const selected = Array.from(inputFiles || []);
+  const extensions = selected.map(file => file.name.split('.').pop().toLowerCase());
+  if (extensions.some(ext => !['zip', 'shp', 'shx', 'dbf', 'prj', 'cpg'].includes(ext)) || selected.length > 8) {
+    showError('یک ZIP یا فایل‌های SHP، SHX، DBF و PRJ یک لایه را انتخاب کنید.'); return;
+  }
+  if (selected.some(file => !file.size) || selected.reduce((sum, file) => sum + file.size, 0) > 50 * 1024 ** 2) {
+    showError('فایل‌های محدوده باید غیرخالی و در مجموع کمتر از ۵۰ مگابایت باشند.'); return;
+  }
+  if (extensions.includes('zip') && selected.length !== 1) {
+    showError('ZIP محدوده را به‌تنهایی انتخاب کنید.'); return;
+  }
+  aoiFiles = selected;
+  $('aoi-name').textContent = selected.length ? (selected.find(file => /\.(shp|zip)$/i.test(file.name)) || selected[0]).name : 'انتخاب مرز محدوده';
+  $('aoi-name').dir = selected.length ? 'auto' : 'rtl';
+  $('aoi-size').textContent = selected.length ? `${number(selected.length, 0)} فایل · ${number(selected.reduce((sum, file) => sum + file.size, 0) / 1024 ** 2, 2)} مگابایت` : 'ZIP یا اجزای شیپ‌فایل · حداکثر ۵۰ مگابایت';
+  $('aoi-remove').hidden = !selected.length;
+  $('aoi-zone').classList.toggle('has-file', !!selected.length);
+  if (!selected.length) $('aoi-files').value = '';
+  $('error-message').hidden = true;
+  markStale();
+}
+$('aoi-files').addEventListener('change', event => setAoi(event.target.files));
+$('aoi-remove').addEventListener('click', () => setAoi([]));
+$('aoi-zone').addEventListener('dragover', event => { event.preventDefault(); if (!busy) $('aoi-zone').classList.add('dragover'); });
+$('aoi-zone').addEventListener('dragleave', () => $('aoi-zone').classList.remove('dragover'));
+$('aoi-zone').addEventListener('drop', event => { event.preventDefault(); $('aoi-zone').classList.remove('dragover'); setAoi(event.dataTransfer.files); });
+
+$('choose-output').addEventListener('click', async () => {
+  if (busy) return;
+  try {
+    const result = await responseJSON(await fetch('/api/desktop/pick-output', { method: 'POST', headers: { 'X-MSU-Session': desktopSession } }));
+    if (result.folder) {
+      outputFolder = result.folder;
+      $('output-path').textContent = result.folder.path;
+      $('output-space').textContent = number(result.folder.free_bytes / 1024 ** 3, 1) + ' گیگابایت فضای آزاد · نتایج در زیرپوشهٔ جدا ذخیره می‌شوند';
+    }
+  } catch (error) { showError(error.message); }
+});
 
 function syncThreshold(value) {
   if (!Number.isFinite(value)) return;
@@ -90,6 +142,7 @@ function upload(form) {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     request.open('POST', '/api/jobs');
+    if (desktopSession) request.setRequestHeader('X-MSU-Session', desktopSession);
     request.responseType = 'json';
     request.upload.onprogress = event => {
       if (event.lengthComputable) updateProgress(Math.round(event.loaded / event.total * 100), 'ارسال فایل‌های ارتفاعی');
@@ -150,14 +203,18 @@ async function run(demo = false) {
       result = await responseJSON(await fetch(`/api/demo?threshold=${encodeURIComponent(threshold)}&inclusive=${$('inclusive').checked}`, { method: 'POST' }));
     } else {
       const form = new FormData();
-      form.append('dem', files.dem);
-      form.append('dsm', files.dsm);
+      for (const kind of ['dem', 'dsm']) {
+        if (files[kind].localToken) form.append(`${kind}_token`, files[kind].localToken);
+        else form.append(kind, files[kind]);
+      }
       form.append('threshold', threshold);
       form.append('inclusive', $('inclusive').checked);
       form.append('dem_unit', $('dem-unit').value);
       form.append('dsm_unit', $('dsm-unit').value);
       form.append('resampling', $('resampling').value);
       form.append('same_datum', $('same-datum').checked);
+      aoiFiles.forEach(file => form.append('aoi_files', file));
+      if (outputFolder) form.append('output_token', outputFolder.token);
       result = await upload(form);
     }
     sessionStorage.setItem('msu-job', result.id);
@@ -181,6 +238,7 @@ function resolutionLabel(input) { return `${input.resolution.map(x => number(x, 
 
 async function showResult(job) {
   const result = job.result;
+  $('retention-note').textContent = job.permanent_output ? 'نتایج در ' + job.output_directory + ' ذخیره شدند و خودکار پاک نمی‌شوند.' : 'نتایج موقت تا ۲۴ ساعت نگهداری می‌شوند؛ خروجی‌های موردنیاز را دریافت کنید.';
   const url = `/api/jobs/${job.id}/files`;
   $('stat-pixels').textContent = number(result.selected_pixels, 0);
   $('stat-percent').textContent = `${number(result.selected_percent)}٪ از پیکسل‌های معتبر`;
@@ -200,7 +258,9 @@ async function showResult(job) {
     ['CRS خروجی', result.grid.crs],
     ['اندازهٔ خروجی', `${number(result.grid.width, 0)} × ${number(result.grid.height, 0)}`],
     ['هسته‌های پردازشی', number(result.resources.cpu_threads, 0)],
+    ['محدودهٔ پردازش', result.aoi ? `${result.aoi.layer} · ${number(result.aoi.feature_count, 0)} عارضه` : 'کل پوشش مشترک'],
   ];
+  if (result.aoi) entries.push(['CRS شیپ‌فایل', result.aoi.source_crs]);
   $('alignment-info').replaceChildren(...entries.flatMap(([label, value]) => {
     const dt = document.createElement('dt'), dd = document.createElement('dd');
     dt.textContent = label; dd.textContent = value;
@@ -220,6 +280,7 @@ async function showResult(job) {
     col.append(bar, text); return col;
   }));
   $('demo-badge').hidden = !job.demo;
+  $('aoi-legend').hidden = !result.aoi;
   $('grid-info').textContent = result.grid.crs;
   $('map-resolution').textContent = `${number(result.grid.width, 0)} × ${number(result.grid.height, 0)} پیکسل · پیش‌نمایش کاهش‌یافته`;
   $('viewer-status').textContent = `ارتفاع از زمین ${result.comparison === '>=' ? '≥' : '>'} ${number(result.threshold_m)} متر`;
@@ -257,7 +318,19 @@ $('help-dialog').addEventListener('click', event => { if (event.target === $('he
 
 fetch('/api/health').then(responseJSON).then(info => {
   $('hardware-status').textContent = `${number(info.resources.cpu_threads, 0)} هسته · ${number(info.resources.gdal_cache_mb / 1024, 1)} گیگابایت کش`;
+  desktopSession = info.desktop_session;
+  $('desktop-exit').hidden = !desktopSession;
+  $('output-settings').hidden = !desktopSession;
 }).catch(() => { $('hardware-status').textContent = 'ارتباط با سرور در دسترس نیست'; });
+
+$('desktop-exit').addEventListener('click', async () => {
+  if (busy && !window.confirm('پردازش هنوز در حال انجام است. از برنامه خارج می‌شوید؟')) return;
+  try {
+    await responseJSON(await fetch('/api/desktop/exit', { method: 'POST', headers: { 'X-MSU-Session': desktopSession } }));
+    document.body.replaceChildren(Object.assign(document.createElement('p'), { textContent: 'برنامه بسته شد. می‌توانید این پنجره را ببندید.' }));
+    window.close();
+  } catch { showError('خروج انجام نشد؛ دوباره تلاش کنید.'); }
+});
 
 // Resume a long-running job after refresh without uploading the rasters again.
 const savedJob = sessionStorage.getItem('msu-job');

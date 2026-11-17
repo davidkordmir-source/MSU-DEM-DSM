@@ -6,7 +6,8 @@
   <meta name="theme-color" content="#122b35">
   <meta name="description" content="استخراج عوارض مرتفع از DEM و DSM بر اساس ارتفاع از سطح زمین، با پشتیبانی از تفکیک‌پذیری متفاوت.">
   <title>MSU Terrain | استخراج عوارض ارتفاعی</title>
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/brand/app.ico" type="image/x-icon">
+  <link rel="apple-touch-icon" href="/brand/logo.png">
   <link rel="stylesheet" href="/styles.css">
   <script type="module" src="/app.js"></script>
 </head>
@@ -27,11 +28,11 @@
 
   <header class="topbar">
     <a class="brand" href="/" aria-label="MSU Terrain صفحهٔ اصلی">
-      <span class="brand-mark"><svg><use href="#i-layers"/></svg></span>
+      <img class="brand-image" src="/brand/logo.png" alt="لوگوی مدل زمین و ساختمان MSU Terrain">
       <span class="brand-text" dir="ltr">MSU <b>TERRAIN</b><small>ELEVATION INTELLIGENCE</small></span>
     </a>
     <nav aria-label="ناوبری اصلی"><a class="nav-active" href="#workspace">فضای تحلیل</a><button id="help-button" type="button">راهنمای کار</button></nav>
-    <span class="local-badge"><span class="status-dot"></span> آفلاین · پردازش روی دستگاه شما</span>
+    <div class="app-controls"><span class="local-badge"><span class="status-dot"></span> آفلاین · پردازش روی دستگاه شما</span><button type="button" id="desktop-exit" class="app-shutdown" hidden>خروج</button></div>
   </header>
 
   <main id="workspace">
@@ -57,7 +58,13 @@
                 <label class="dropzone" id="dsm-zone" for="dsm-file"><span class="upload-icon surface"><svg><use href="#i-upload"/></svg></span><span><strong id="dsm-name">فایل سطح را انتخاب کنید</strong><small id="dsm-size">یا فایل را اینجا رها کنید</small></span><input id="dsm-file" type="file" accept=".tif,.tiff" aria-describedby="dsm-size"></label>
                 <div class="file-actions"><label for="dsm-unit">واحد ارتفاع</label><select id="dsm-unit"><option value="m">متر</option><option value="ft">فوت بین‌المللی</option><option value="us-ft">فوت پیمایشی آمریکا</option></select><button type="button" class="remove-file" id="dsm-remove" hidden>حذف فایل</button></div>
               </div>
-              <div class="mini-note"><svg><use href="#i-info"/></svg><span>اندازهٔ پیکسل‌ها می‌تواند متفاوت باشد. حداکثر هر فایل ۵۱۲ مگابایت.</span></div>
+              <div class="mini-note"><svg><use href="#i-info"/></svg><span>ورودی TIF/GeoTIFF بدون سقف ثابت حجم. در نسخهٔ نصبی، انتخاب فایل آن را مستقیم از دیسک می‌خواند؛ پردازش قطعه‌ای است.</span></div>
+              <div class="upload-field aoi-upload">
+                <div class="file-label"><label for="aoi-files">محدودهٔ پردازش <b>شیپ‌فایل</b></label><span>اختیاری</span></div>
+                <label class="dropzone" id="aoi-zone" for="aoi-files"><span class="upload-icon"><svg><use href="#i-target"/></svg></span><span><strong id="aoi-name">انتخاب مرز محدوده</strong><small id="aoi-size">ZIP یا اجزای شیپ‌فایل · حداکثر ۵۰ مگابایت</small></span><input id="aoi-files" type="file" multiple accept=".zip,.shp,.shx,.dbf,.prj,.cpg" aria-describedby="aoi-help"></label>
+                <div class="file-actions"><span id="aoi-help">فایل‌های هم‌نام SHP + SHX + DBF + PRJ</span><button type="button" class="remove-file" id="aoi-remove" hidden>حذف محدوده</button></div>
+                <p class="aoi-note">بدون شیپ‌فایل، کل پوشش مشترک پردازش می‌شود. با انتخاب محدوده، فقط مرکز پیکسل‌های داخل مرز محاسبه می‌شود.</p>
+              </div>
             </section>
 
             <section class="panel-section parameters">
@@ -69,6 +76,11 @@
               <label class="check-label"><input id="inclusive" type="checkbox"><span>ارتفاع مساوی آستانه هم انتخاب شود <b dir="ltr">≥</b></span></label>
               <details class="advanced"><summary>تنظیمات هم‌مکان‌سازی</summary><label for="resampling">بازنمونه‌برداری DEM روی شبکهٔ DSM</label><select id="resampling"><option value="auto">خودکار (پیشنهادی)</option><option value="bilinear">درون‌یابی دوخطی · Bilinear</option><option value="average">میانگین‌گیری · Average</option><option value="nearest">نزدیک‌ترین همسایه · Nearest</option></select><p>حالت خودکار: DEM درشت‌تر با درون‌یابی و DEM ریزتر با میانگین‌گیری تبدیل می‌شود. خروجی، اندازهٔ پیکسل DSM را حفظ می‌کند.</p></details>
               <label class="check-label datum-check"><input id="same-datum" type="checkbox"><span>دو فایل مبنای ارتفاعی یکسان دارند.<small>مثلاً هر دو نسبت به سطح متوسط دریا هستند.</small></span></label>
+              <div class="output-settings" id="output-settings" hidden>
+                <button class="button secondary" type="button" id="choose-output">انتخاب پوشهٔ نتایج</button>
+                <span id="output-path" dir="auto">پیش‌فرض: پوشهٔ موقت برنامه</span>
+                <small id="output-space">برای TIFهای حجیم، درایوی با فضای کافی انتخاب کنید. نتایج این پوشه خودکار حذف نمی‌شوند.</small>
+              </div>
               <button class="button primary analyze-button" type="submit" id="analyze-button"><svg><use href="#i-layers"/></svg><span>تحلیل و استخراج عوارض</span><svg class="arrow-icon"><use href="#i-arrow"/></svg></button>
               <p class="output-note">خروجی GeoTIFF با مختصات و تفکیک‌پذیری DSM</p>
             </section>
@@ -90,7 +102,7 @@
             <label class="mask-toggle" id="mask-toggle" hidden><input type="checkbox" id="show-mask" checked><span></span> نمایش انتخاب‌ها</label>
             <div class="map-bottomline"><span id="map-resolution">پیش‌نمایش نقشهٔ ارتفاعی</span><span id="renderer-status">آماده‌سازی نمایشگر</span></div>
           </div>
-          <div class="viewer-footer"><div><span class="legend-gradient"></span><span>ارتفاع کمتر</span><span class="legend-divider">—</span><span>ارتفاع بیشتر</span></div><span id="grid-info">شبکهٔ مرجع: DSM</span></div>
+          <div class="viewer-footer"><div><span class="legend-gradient"></span><span>ارتفاع کمتر</span><span class="legend-divider">—</span><span>ارتفاع بیشتر</span><span id="aoi-legend" hidden><i></i> مرز محدوده</span></div><span id="grid-info">شبکهٔ مرجع: DSM</span></div>
         </section>
 
         <div id="error-message" class="error-message" role="alert" hidden></div>
@@ -107,7 +119,7 @@
           <div class="result-heading"><div><h2>نتیجهٔ استخراج</h2><p id="result-summary"></p></div><a class="button primary" id="download-all" href="#"><svg><use href="#i-download"/></svg> دریافت همهٔ خروجی‌ها</a></div>
           <div class="download-links"><a id="download-extracted">عوارض منتخب <span>GeoTIFF</span></a><a id="download-height">مدل ارتفاع نسبی <span>nDSM</span></a><a id="download-mask">ماسک دودویی <span>0 / 1</span></a><a id="download-report">گزارش پردازش <span>JSON</span></a></div>
           <div class="result-columns"><div><h3>توزیع ارتفاع از زمین <span>متر</span></h3><div class="histogram" id="histogram" aria-label="نمودار توزیع ارتفاع"></div></div><div class="alignment-info"><h3>مشخصات هم‌مکان‌سازی</h3><dl id="alignment-info"></dl></div></div>
-          <ul class="warnings" id="warnings"></ul><p class="retention-note">خروجی‌ها موقت‌اند و پس از ۲۴ ساعت قابل پاک‌سازی هستند؛ فایل‌های موردنیاز را دریافت کنید.</p>
+          <ul class="warnings" id="warnings"></ul><p class="retention-note" id="retention-note">خروجی‌ها موقت‌اند و پس از ۲۴ ساعت قابل پاک‌سازی هستند؛ فایل‌های موردنیاز را دریافت کنید.</p>
         </section>
 
         <section class="explanation-card"><div class="explanation-copy"><div class="eyebrow">منطق استخراج</div><h2>زیر سطح دریا هم درست محاسبه می‌شود.</h2><p>مبنای انتخاب، فاصلهٔ عارضه از زمینِ همان نقطه است. اگر زمین ۱۰۰− متر و سطح عارضه ۵۰− متر باشد، ارتفاع عارضه ۵۰ متر است.</p><span class="formula" dir="ltr">nDSM = DSM − DEM</span></div><div class="example-visual"><div class="example-number" dir="ltr">−50 − (−100) = <b>50 m</b></div><div class="diagram"><span class="sea-label">سطح دریا · ۰</span><span class="sea-line"></span><div class="building"><i></i><i></i><i></i><i></i><i></i><i></i></div><span class="height-measure">۵۰ متر</span><span class="ground-line"></span><span class="ground-label">زمین · ۱۰۰−</span></div><span class="example-match"><svg><use href="#i-check"/></svg> با آستانهٔ ۳۰ متر انتخاب می‌شود</span></div></section>

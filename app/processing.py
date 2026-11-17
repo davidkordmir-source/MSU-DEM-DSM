@@ -7,26 +7,22 @@ import time
 from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
-from zipfile import ZIP_STORED, ZipFile
 
 import numpy as np
 import rasterio
 from PIL import Image
 from rasterio.enums import Resampling
-from rasterio.errors import RasterioError
+from rasterio.errors import RasterioError, WindowError
+from rasterio.features import geometry_mask, geometry_window
 from rasterio.vrt import WarpedVRT
 from rasterio.warp import calculate_default_transform
 from rasterio.windows import Window
 
+from app.aoi import load_aoi
+from app.errors import ProcessingError
 from app.resources import resource_budget
 
-
-class ProcessingError(ValueError):
-    pass
-
-
 UNIT_FACTORS = {"m": 1.0, "ft": 0.3048, "us-ft": 1200 / 3937}
-MAX_PIXELS = 500_000_000
 
 
 def validate_raster(src, label: str) -> None:
@@ -34,8 +30,6 @@ def validate_raster(src, label: str) -> None:
         raise ProcessingError(f"فایل {label} باید یک GeoTIFF تک‌باند ارتفاعی باشد.")
     if src.crs is None:
         raise ProcessingError(f"سیستم مختصات فایل {label} مشخص نیست؛ ابتدا CRS صحیح را به فایل اختصاص دهید.")
-    if src.width * src.height > MAX_PIXELS:
-        raise ProcessingError(f"فایل {label} بیش از ۵۰۰ میلیون پیکسل دارد؛ ابتدا منطقهٔ موردنظر را برش دهید.")
     if np.dtype(src.dtypes[0]).kind not in "fiu":
         raise ProcessingError(f"نوع دادهٔ ارتفاعی {label} پشتیبانی نمی‌شود.")
     if not all(math.isfinite(x) for x in (*src.transform[:6], src.scales[0], src.offsets[0])):
@@ -73,13 +67,17 @@ def choose_resampling(dem, dsm, method: str) -> tuple[str, bool]:
     return ("average" if target_area > source_area * 1.01 else "bilinear"), False
 
 
-def _preview(path: Path, out: Path, kind: str, max_size: int) -> None:
+def _preview(path: Path, out: Path, kind: str, max_size: int, *, window=None, validity=None) -> None:
     with rasterio.open(path) as src:
-        scale = min(1, max_size / max(src.width, src.height))
-        shape = (max(1, round(src.height * scale)), max(1, round(src.width * scale)))
-        sample = src.read(1, out_shape=shape, masked=True, resampling=Resampling.nearest)
+        width, height = (window.width, window.height) if window else (src.width, src.height)
+        scale = min(1, max_size / max(width, height))
+        shape = (max(1, round(height * scale)), max(1, round(width * scale)))
+        sample = src.read(1, window=window, out_shape=shape, masked=True, resampling=Resampling.nearest)
         values = np.asarray(sample.filled(0), dtype="float32")
         valid = ~np.ma.getmaskarray(sample) & np.isfinite(values)
+        if validity:
+            with rasterio.open(validity) as mask_src:
+                valid &= mask_src.read_masks(1, out_shape=shape, resampling=Resampling.nearest) != 0
         colors = np.zeros((*shape, 4), dtype="uint8")
         if kind == "mask":
             colors[..., :3] = (42, 224, 166)
@@ -115,6 +113,7 @@ def process_rasters(
     resampling: str = "auto",
     progress: Callable[[int, str], None] = lambda *_: None,
     filenames: tuple[str, str] = ("dem.tif", "dsm.tif"),
+    aoi_directory: Path | None = None,
 ) -> dict:
     if not math.isfinite(threshold) or threshold < 0:
         raise ProcessingError("آستانه باید عددی متناهی و نامنفی بر حسب متر باشد.")
@@ -140,11 +139,23 @@ def process_rasters(
             dsm = stack.enter_context(rasterio.open(dsm_path, driver="GTiff"))
             validate_raster(dem, "DEM")
             validate_raster(dsm, "DSM")
+            aoi = load_aoi(aoi_directory, dsm.crs) if aoi_directory else None
+            source_window = Window(0, 0, dsm.width, dsm.height)
+            if aoi:
+                try:
+                    source_window = geometry_window(dsm, [aoi.geometry])
+                except WindowError as exc:
+                    raise ProcessingError("محدودهٔ شیپ‌فایل با DSM هم‌پوشانی ندارد.") from exc
+            width, height = int(source_window.width), int(source_window.height)
+            output_transform = dsm.window_transform(source_window)
             method, aligned = choose_resampling(dem, dsm, resampling)
-            # Three uncompressed rasters need 9 bytes/pixel. Reserve ZIP capacity too.
-            required = dsm.width * dsm.height * 18 + 32 * 1024**2
+            # Three uncompressed rasters need 9 bytes/pixel. ZIP is streamed on demand.
+            required = width * height * 9 + 32 * 1024**2
             if shutil.disk_usage(output).free < required:
-                raise ProcessingError("فضای دیسک برای این منطقه کافی نیست؛ فایل کوچک‌تری انتخاب کنید.")
+                raise ProcessingError(
+                    f"برای خروجی این محدوده حدود {required / 1024**3:.1f} گیگابایت فضای آزاد لازم است؛ "
+                    "پوشهٔ خروجی را روی درایو بزرگ‌تر انتخاب کنید یا محدوده را کوچک‌تر کنید."
+                )
             ground = (
                 dem
                 if aligned
@@ -170,11 +181,11 @@ def process_rasters(
             }
             profile = {
                 "driver": "GTiff",
-                "width": dsm.width,
-                "height": dsm.height,
+                "width": width,
+                "height": height,
                 "count": 1,
                 "crs": dsm.crs,
-                "transform": dsm.transform,
+                "transform": output_transform,
                 "tiled": True,
                 "blockxsize": 512,
                 "blockysize": 512,
@@ -211,19 +222,41 @@ def process_rasters(
                     dem_resampling=method,
                     vertical_reference="local_ground",
                 )
-            valid_count = selected_count = negative_count = 0
+            valid_count = selected_count = negative_count = inside_count = 0
             selected_sum = 0.0
             selected_min, selected_max = math.inf, -math.inf
             histogram_edges = np.array([0, 5, 10, 20, 30, 50, 75, 100, np.inf])
             histogram = np.zeros(8, dtype="int64")
             size = budget["block_size"]
-            total = math.ceil(dsm.width / size) * math.ceil(dsm.height / size)
+            total = math.ceil(width / size) * math.ceil(height / size)
             completed = 0
-            for row in range(0, dsm.height, size):
-                for col in range(0, dsm.width, size):
-                    window = Window(col, row, min(size, dsm.width - col), min(size, dsm.height - row))
-                    terrain = ground.read(1, window=window, masked=True, out_dtype="float64")
-                    surface = dsm.read(1, window=window, masked=True, out_dtype="float64")
+            for row in range(0, height, size):
+                for col in range(0, width, size):
+                    window = Window(col, row, min(size, width - col), min(size, height - row))
+                    read_window = Window(
+                        col + source_window.col_off, row + source_window.row_off, window.width, window.height
+                    )
+                    shape = (int(window.height), int(window.width))
+                    inside = (
+                        geometry_mask(
+                            [aoi.geometry],
+                            out_shape=shape,
+                            transform=dsm.window_transform(read_window),
+                            invert=True,
+                        )
+                        if aoi
+                        else np.ones(shape, dtype=bool)
+                    )
+                    inside_count += int(inside.sum())
+                    if not inside.any():
+                        for name in ("height", "extracted"):
+                            writers[name].write(np.full(shape, np.nan, dtype="float32"), 1, window=window)
+                        writers["mask"].write(np.full(shape, 255, dtype="uint8"), 1, window=window)
+                        completed += 1
+                        progress(5 + round(78 * completed / total), "برش محدوده و استخراج ارتفاع")
+                        continue
+                    terrain = ground.read(1, window=read_window, masked=True, out_dtype="float64")
+                    surface = dsm.read(1, window=read_window, masked=True, out_dtype="float64")
                     terrain_values = (terrain.data * dem.scales[0] + dem.offsets[0]) * UNIT_FACTORS[dem_unit]
                     surface_values = (surface.data * dsm.scales[0] + dsm.offsets[0]) * UNIT_FACTORS[dsm_unit]
                     heights = surface_values - terrain_values
@@ -238,6 +271,7 @@ def process_rasters(
                         & np.isfinite(surface_values)
                         & np.isfinite(heights)
                         & (np.abs(heights) <= np.finfo("float32").max)
+                        & inside
                     )
                     # Bilinear warping can leave ~1e-14 noise even on constant terrain.
                     # Bound float64 roundoff so exact threshold values stay on the boundary.
@@ -268,7 +302,7 @@ def process_rasters(
                     progress(5 + round(78 * completed / total), "هم‌مکان‌سازی و استخراج ارتفاع")
             if not valid_count:
                 raise ProcessingError(
-                    "دو فایل، پیکسل معتبر مشترک ندارند. محدوده، CRS و مقادیر NoData را بررسی کنید."
+                    "در محدودهٔ انتخاب‌شده پیکسل معتبر مشترک وجود ندارد. محدوده، CRS و NoData را بررسی کنید."
                 )
             pixel_area = None
             if dsm.crs.is_projected:
@@ -285,7 +319,11 @@ def process_rasters(
                 warnings.append(
                     "برخی مقادیر DSM پایین‌تر از DEM هستند؛ این مقادیر در nDSM حفظ و از انتخاب نامنفی حذف شده‌اند."
                 )
-            if valid_count < dsm.width * dsm.height:
+            if aoi:
+                warnings.append(
+                    "خروجی به کادر محدوده برش خورده است؛ فقط پیکسل‌هایی که مرکز آن‌ها داخل چندضلعی است معتبرند. حفره‌ها و بیرون مرز NoData هستند."
+                )
+            if valid_count < inside_count:
                 warnings.append("پیکسل‌های NoData و نواحی فاقد پوشش مشترک در خروجی نامعتبر هستند.")
             if pixel_area is None:
                 warnings.append("محاسبهٔ مساحت فقط برای شبکهٔ خروجی با سیستم مختصات تصویرشده انجام می‌شود.")
@@ -296,18 +334,21 @@ def process_rasters(
                 "resampling": method,
                 "aligned": aligned,
                 "inputs": info,
+                "aoi": aoi.info if aoi else None,
                 "grid": {
                     "crs": dsm.crs.to_string(),
-                    "width": dsm.width,
-                    "height": dsm.height,
+                    "width": width,
+                    "height": height,
                     "resolution": list(dsm.res),
                     "horizontal_unit": info["dsm"]["horizontal_unit"],
-                    "bounds": list(dsm.bounds),
-                    "transform": list(dsm.transform)[:6],
+                    "bounds": list(rasterio.transform.array_bounds(height, width, output_transform)),
+                    "transform": list(output_transform)[:6],
                 },
                 "valid_pixels": valid_count,
                 "selected_pixels": selected_count,
-                "invalid_pixels": dsm.width * dsm.height - valid_count,
+                "invalid_pixels": width * height - valid_count,
+                "aoi_pixels": inside_count,
+                "outside_aoi_pixels": width * height - inside_count,
                 "negative_pixels": negative_count,
                 "selected_percent": 100 * selected_count / valid_count,
                 "selected_area_m2": selected_count * pixel_area if pixel_area is not None else None,
@@ -324,15 +365,31 @@ def process_rasters(
         progress(87, "ساخت پیش‌نمایش و خروجی‌ها")
         for name, kind in (("height", "height"), ("mask", "mask")):
             _preview(output / f"{name}.tif", output / f"{name}.png", kind, budget["preview_max_size"])
-        _preview(dsm_path, output / "surface.png", "surface", budget["preview_max_size"])
+        _preview(
+            dsm_path,
+            output / "surface.png",
+            "surface",
+            budget["preview_max_size"],
+            window=source_window,
+            validity=output / "height.tif",
+        )
+        if aoi:
+            with Image.open(output / "height.png") as preview:
+                pw, ph = preview.size
+            transform = output_transform * rasterio.Affine.scale(width / pw, height / ph)
+            inside = geometry_mask([aoi.geometry], out_shape=(ph, pw), transform=transform, invert=True)
+            padded = np.pad(inside, 1, constant_values=False)
+            interior = inside & padded[:-2, 1:-1] & padded[2:, 1:-1] & padded[1:-1, :-2] & padded[1:-1, 2:]
+            border = inside & ~interior
+            rgba = np.zeros((ph, pw, 4), dtype="uint8")
+            rgba[border] = [248, 198, 92, 255]
+            Image.fromarray(rgba).save(output / "aoi.png")
+        else:
+            Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(output / "aoi.png")
         report["elapsed_seconds"] = round(time.monotonic() - started, 2)
         (output / "report.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        progress(95, "بسته‌بندی فایل‌های قابل دریافت")
-        with ZipFile(output / "results.zip", "w", compression=ZIP_STORED, allowZip64=True) as archive:
-            for name in ("height.tif", "extracted.tif", "mask.tif", "report.json"):
-                archive.write(output / name, name)
         progress(100, "پردازش کامل شد")
         return report
     except RasterioError as exc:

@@ -5,9 +5,11 @@ import os
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
+from zipfile import ZipFile
 
 import numpy as np
 import rasterio
+import shapefile
 from playwright.sync_api import expect, sync_playwright
 from rasterio.transform import from_origin
 
@@ -38,6 +40,24 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
     surface = np.full((60, 60), -100.0)
     surface[10:30, 10:30] = -50
     write_raster(root / "dsm_05m.tif", surface, 0.5)
+    with shapefile.Writer(str(root / "boundary")) as writer:
+        writer.field("id", "N")
+        writer.poly(
+            [
+                [
+                    (500005, 4099990),
+                    (500005, 4099995),
+                    (500010, 4099995),
+                    (500010, 4099990),
+                    (500005, 4099990),
+                ]
+            ]
+        )
+        writer.record(1)
+    (root / "boundary.prj").write_text(rasterio.CRS.from_epsg(32639).to_wkt())
+    with ZipFile(root / "boundary.zip", "w") as archive:
+        for ext in ("shp", "shx", "dbf", "prj"):
+            archive.write(root / f"boundary.{ext}", f"boundary.{ext}")
     browser = p.chromium.launch(
         executable_path=os.environ.get("CHROMIUM_PATH", "/usr/bin/chromium"),
         headless=True,
@@ -99,6 +119,34 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
     expect(page.locator("#alignment-info")).to_contain_text("درون‌یابی دوخطی")
     expect(page.locator("#error-message")).to_be_hidden()
     page.screenshot(path=str(ARTIFACTS / "desktop-upload.png"), full_page=True)
+    page.locator("#aoi-files").set_input_files(root / "boundary.zip")
+    expect(page.locator("#aoi-name")).to_have_text("boundary.zip")
+    expect(page.locator("#stale-notice")).to_be_visible()
+    page.locator("#analyze-button").click()
+    expect(page.locator("#processing-overlay")).to_be_hidden(timeout=30000)
+    expect(page.locator("#stat-pixels")).to_have_text("۱۰۰")
+    expect(page.locator("#stat-area")).to_have_text("۲۵")
+    expect(page.locator("#aoi-legend")).to_be_visible()
+    expect(page.locator("#alignment-info")).to_contain_text("boundary")
+    with page.expect_download() as aoi_download:
+        page.locator("#download-all").click()
+    aoi_download.value.save_as(str(ARTIFACTS / "aoi-results.zip"))
+    with ZipFile(ARTIFACTS / "aoi-results.zip") as archive:
+        report = json.loads(archive.read("report.json"))
+        assert report["selected_pixels"] == 100
+        with rasterio.MemoryFile(archive.read("height.tif")) as memory, memory.open() as output:
+            assert output.shape == (10, 10)
+            np.testing.assert_allclose(output.read(1), 50)
+    page.screenshot(path=str(ARTIFACTS / "desktop-aoi.png"), full_page=True)
+    page.locator("#aoi-remove").click()
+    expect(page.locator("#aoi-remove")).to_be_hidden()
+    page.locator("#aoi-files").set_input_files(
+        [root / f"boundary.{ext}" for ext in ("shp", "shx", "dbf", "prj")]
+    )
+    expect(page.locator("#aoi-name")).to_have_text("boundary.shp")
+    page.locator("#analyze-button").click()
+    expect(page.locator("#processing-overlay")).to_be_hidden(timeout=30000)
+    expect(page.locator("#stat-pixels")).to_have_text("۱۰۰")
     for width in (390, 768, 1024, 1440):
         page.set_viewport_size({"width": width, "height": 900})
         page.wait_for_timeout(150)
@@ -114,6 +162,8 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
                 "checks": [
                     "demo",
                     "real upload at 10m/0.5m",
+                    "AOI ZIP and shapefile components",
+                    "AOI crop and downloaded pixel values",
                     "downloads",
                     "refresh",
                     "validation",

@@ -82,6 +82,7 @@ export class RasterViewer {
       varying vec2 v_position;
       uniform sampler2D u_image;
       uniform sampler2D u_mask;
+      uniform sampler2D u_aoi;
       uniform vec2 u_viewport;
       uniform vec2 u_center;
       uniform vec2 u_size;
@@ -96,6 +97,8 @@ export class RasterViewer {
           vec4 mask = texture2D(u_mask, uv);
           vec3 color = mix(background, base.rgb, base.a);
           color = mix(color, mask.rgb, mask.a * u_overlay * .45);
+          vec4 aoi = texture2D(u_aoi, uv);
+          color = mix(color, aoi.rgb, aoi.a);
           gl_FragColor = vec4(color, 1.);
         }
       }`);
@@ -111,7 +114,7 @@ export class RasterViewer {
     const position = gl.getAttribLocation(this.program, 'a_position');
     gl.enableVertexAttribArray(position);
     gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
-    this.uniforms = Object.fromEntries(['image', 'mask', 'viewport', 'center', 'size', 'overlay']
+    this.uniforms = Object.fromEntries(['image', 'mask', 'aoi', 'viewport', 'center', 'size', 'overlay']
       .map(name => [name, gl.getUniformLocation(this.program, `u_${name}`)]));
   }
 
@@ -120,7 +123,7 @@ export class RasterViewer {
     if (this.textures[name]) gl.deleteTexture(this.textures[name]);
     const texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    const filter = name === 'mask' ? gl.NEAREST : gl.LINEAR;
+    const filter = ['mask', 'aoi'].includes(name) ? gl.NEAREST : gl.LINEAR;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -130,7 +133,7 @@ export class RasterViewer {
   }
 
   async load(baseUrl) {
-    const entries = await Promise.all(['height', 'surface', 'mask'].map(name => new Promise((resolve, reject) => {
+    const entries = await Promise.all(['height', 'surface', 'mask', 'aoi'].map(name => new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => resolve([name, img]);
       img.onerror = () => reject(new Error('پیش‌نمایش دریافت نشد؛ خروجی‌ها همچنان قابل دریافت هستند.'));
@@ -194,6 +197,9 @@ export class RasterViewer {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, this.textures.mask);
       gl.uniform1i(this.uniforms.mask, 1);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, this.textures.aoi);
+      gl.uniform1i(this.uniforms.aoi, 2);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     } else {
       const ctx = this.ctx;
@@ -209,6 +215,8 @@ export class RasterViewer {
         ctx.drawImage(this.images.mask, ...args);
         ctx.globalAlpha = 1;
       }
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(this.images.aoi, ...args);
     }
   }
 }
