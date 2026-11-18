@@ -30,7 +30,14 @@ def test_below_sea_level_and_strict_boundary(raster, tmp_path):
     assert report["resampling"] == "none"
     assert np.isnan(read(out, "extracted")[0, 1])
     with ZipFile(BytesIO(b"".join(stream_results(out)))) as archive:
-        assert set(archive.namelist()) == {"height.tif", "extracted.tif", "mask.tif", "report.json"}
+        assert {
+            "height.tif",
+            "extracted.tif",
+            "mask.tif",
+            "report.json",
+            "features_001.shp",
+            "features_001.dbf",
+        } <= set(archive.namelist())
         assert json.loads(archive.read("report.json"))["selected_pixels"] == 2
 
 

@@ -21,6 +21,7 @@ from rasterio.windows import Window
 from app.aoi import load_aoi
 from app.errors import ProcessingError
 from app.resources import resource_budget
+from app.vectors import VectorBuilder
 
 UNIT_FACTORS = {"m": 1.0, "ft": 0.3048, "us-ft": 1200 / 3937}
 
@@ -148,6 +149,9 @@ def process_rasters(
                     raise ProcessingError("محدودهٔ شیپ‌فایل با DSM هم‌پوشانی ندارد.") from exc
             width, height = int(source_window.width), int(source_window.height)
             output_transform = dsm.window_transform(source_window)
+            vectors = stack.enter_context(
+                VectorBuilder(output, output_transform, dsm.crs, threshold, inclusive)
+            )
             method, aligned = choose_resampling(dem, dsm, resampling)
             # Three uncompressed rasters need 9 bytes/pixel. ZIP is streamed on demand.
             required = width * height * 9 + 32 * 1024**2
@@ -282,6 +286,7 @@ def process_rasters(
                     )
                     delta = heights - threshold
                     selected = valid & (delta >= -epsilon if inclusive else delta > epsilon)
+                    vectors.add(window, selected, heights)
                     valid_count += int(valid.sum())
                     selected_count += int(selected.sum())
                     negative_count += int((valid & (heights < 0)).sum())
@@ -327,7 +332,9 @@ def process_rasters(
                 warnings.append("پیکسل‌های NoData و نواحی فاقد پوشش مشترک در خروجی نامعتبر هستند.")
             if pixel_area is None:
                 warnings.append("محاسبهٔ مساحت فقط برای شبکهٔ خروجی با سیستم مختصات تصویرشده انجام می‌شود.")
+            vector_report = vectors.finish(progress)
             report = {
+                "vector": vector_report,
                 "threshold_m": threshold,
                 "comparison": ">=" if inclusive else ">",
                 "formula": "DSM - DEM",
@@ -362,7 +369,7 @@ def process_rasters(
                 "resources": budget,
                 "warnings": warnings,
             }
-        progress(87, "ساخت پیش‌نمایش و خروجی‌ها")
+        progress(94, "ساخت پیش‌نمایش و خروجی‌ها")
         for name, kind in (("height", "height"), ("mask", "mask")):
             _preview(output / f"{name}.tif", output / f"{name}.png", kind, budget["preview_max_size"])
         _preview(

@@ -1,20 +1,21 @@
-# Windows desktop installer 0.3.0 validation
+# Windows desktop installer 0.4.0 validation
 
-Target: Windows 10/11 x64; official CPython 3.12.10, GDAL/PROJ/GEOS and 24 locked Windows wheels included. No runtime downloads.
+Target: Windows 10/11 x64. Official CPython 3.12.10, GDAL/PROJ/GEOS, SQLite and 24 locked wheels are included; there are no runtime downloads.
 
-- 42 unit/API tests passed. Coverage includes below-sea-level heights, thresholds, NoData, units, 10 m / 0.5 m grids, CRS conversion, shapefile components/ZIP, holes and overlapping polygons, output-folder retention, and bounded ZIP64 streaming. Ruff checks and formatting checks passed.
-- All 3,486 payload files were verified against the bundled SHA-256 manifest after installation. App source and README in the installed payload were compared with this checkout. Runtime and dependency archives were checked against the locked upstream hashes.
-- The x64 NSIS installer installed the app, Desktop/Start-menu shortcuts and uninstall registry entries under Wine 10. The native launcher started bundled pythonw without a console, served the local app and exited through the UI.
-- The actual Windows runtime passed offline_smoke.py: negative elevations, 10 m / 0.5 m resampling, shapefile cropping, output values, offline CRS conversion and blocked external Python socket connections.
-- Browser flow tests passed for sample processing, raster upload, shapefile ZIP/components, cropped output values, downloads, refresh recovery, validation, map controls and four responsive widths. External browser requests were blocked; none were attempted.
-- A further test of the final installed Windows build used the real Win32 raster and folder dialogs. Two BigTIFF fixtures each had a logical size of 137,438,953,472 bytes (128 GiB), on a grid of 262,144 × 131,072 pixels. Direct file selection, extraction of a 2 × 2-pixel shapefile AOI, permanent results, ZIP64 download, preservation of source files and application exit passed.
-- Those large fixtures were sparse files with very little allocated data. This checks 64-bit file sizes, large-grid metadata, native selection and windowed AOI processing. It does **not** benchmark reading or processing 100 GB of real raster samples across the complete image. Real throughput depends on data layout, compression, disk, CPU and the selected area.
-- Uninstall removed all payload files, its executable, three shortcuts and the uninstall registry entry. An unknown user file inside the install folder, AppData and permanent selected-folder results were retained.
-- Validation used Linux, Wine and headless Chromium. A physical Windows installation, the Edge/Chrome app window on Windows, and physical GPU throughput have not been tested. Wine and test-only Microsoft SDK/UCRT files are not distributed with the app. Windows 10/11 supplies the OS runtime.
+- 53 unit/API tests passed. New coverage includes attributed shapefiles, merging across raster/tile boundaries, holes, diagonal separation, empty vector layers, geographic null areas, splitting at the shapefile component-size limit, input previews, overviews, sampled large-grid previews and single-upload reuse.
+- Strict threshold tests select 31, 50, 200, 1,000 and 10,000 m above ground for a 30 m threshold and exclude exactly 30 m. There is no upper extraction threshold. A further cross-tile connectivity check passed on 30 generated scenes.
+- Ruff checks, formatting checks and git whitespace checks passed.
+- All 3,488 files in the installed payload were compared with the SHA-256 manifest. Installed source, frontend, README and offline self-check were compared with this checkout. Upstream runtime/wheel hashes are locked in packaging/windows-lock.json.
+- The actual Windows runtime passed offline_smoke.py under Wine 10: negative sea-level elevations, 10 m / 0.5 m grids, shapefile AOI, attributed shapefile output, input preview, GeoTIFF values, offline CRS conversion and external Python socket blocking.
+- The complete browser suite passed against both Linux and the installed Windows backend: independent DEM/DSM previews before extraction, map controls, validation, sample processing, real upload, attributed SHP/DBF download, AOI ZIP/components, cropped output values, ZIP64 downloads, refresh and four viewport widths. External browser requests were blocked and none were attempted.
+- Large-raster checks use sparse fixtures with 128 GiB logical size and a 262,144 × 131,072-pixel grid. They validate size handling, direct native selection, bounded preview sampling and AOI extraction; they do not measure processing 100 GB of actual raster samples across a full image.
+- The final installed build passed the Win32 file/folder-dialog flow with two such 128 GiB fixtures: each input preview appeared before extraction, a 2 × 2 AOI produced one attributed polygon with H_MAX_M=50, the ZIP64 download contained SHP/DBF and the app exited through its UI. Original input files were preserved.
+- Polygonization uses 256-pixel tiles and disk-backed connectivity, then merges each connected feature. Geometry complexity still affects disk and memory consumption; a single exceptionally complex geometry is subject to Shapefile's format limit. Output layers roll over before a component reaches 2 GB.
+- Windows validation is through Linux/Wine and headless Chromium. A physical Windows machine, Edge/Chrome app-window integration on Windows and physical GPU throughput have not been tested. Wine and the test-only Microsoft SDK/UCRT are not included in the installer.
 
-The installer is unsigned. Its direct GitHub download is versioned at tag v0.3.0-desktop. The earlier portable package remains accessible at tag v0.2.0-offline.
+The installer is unsigned. Download tag: v0.4.0-desktop. Older releases remain available through their version tags.
 
 ```text
-47,820,970 bytes
-c33a4a6b1eb27548594ab946f3076eb687a8db880bcb244e191f8d14618e3fd0  MSU-Terrain-Setup-0.3.0-x64.exe
+47,830,140 bytes
+17ad3d239db8be3772aa2bc8bd6e9151a2093f63bc38190d8074d9ce08ed4bfe  MSU-Terrain-Setup-0.4.0-x64.exe
 ```

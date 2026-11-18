@@ -7,6 +7,7 @@ export class RasterViewer {
     this.pan = [0, 0];
     this.images = {};
     this.textures = {};
+    this.inputAspects = {};
     this.layer = 'height';
     this.overlay = true;
     this.frame = null;
@@ -63,6 +64,9 @@ export class RasterViewer {
 
   initGL() {
     const gl = this.gl;
+    const empty = document.createElement('canvas');
+    empty.width = empty.height = 1;
+    this.uploadTexture('empty', empty);
     const compile = (type, source) => {
       const shader = gl.createShader(type);
       gl.shaderSource(shader, source);
@@ -139,13 +143,27 @@ export class RasterViewer {
       img.onerror = () => reject(new Error('پیش‌نمایش دریافت نشد؛ خروجی‌ها همچنان قابل دریافت هستند.'));
       img.src = `${baseUrl}/${name}.png`;
     })));
-    this.images = Object.fromEntries(entries);
+    Object.assign(this.images, Object.fromEntries(entries));
     if (this.gl) for (const [key, img] of entries) this.uploadTexture(key, img);
     this.canvas.hidden = false;
     this.reset();
   }
 
   reset() { this.zoom = 1; this.pan = [0, 0]; this.draw(); }
+  async loadInput(kind, url, aspect, isCurrent) {
+    const img = await new Promise((resolve, reject) => {
+      const picture = new Image();
+      picture.onload = () => resolve(picture);
+      picture.onerror = () => reject(new Error('پیش‌نمایش ورودی دریافت نشد.'));
+      picture.src = url;
+    });
+    if (!isCurrent()) return;
+    const key = 'input_' + kind;
+    this.images[key] = img;
+    this.inputAspects[key] = aspect;
+    if (this.gl) this.uploadTexture(key, img);
+    this.canvas.hidden = false;
+  }
   zoomBy(factor, point) {
     const next = Math.max(.5, Math.min(32, this.zoom * factor));
     if (point) {
@@ -178,10 +196,12 @@ export class RasterViewer {
       this.canvas.width = width;
       this.canvas.height = height;
     }
-    const scale = Math.min(rect.width / image.width, rect.height / image.height) * .88 * this.zoom;
-    const size = [image.width * scale, image.height * scale];
+    const input = this.layer.startsWith('input_');
+    const imageWidth = image.height * (this.inputAspects[this.layer] || image.width / image.height);
+    const scale = Math.min(rect.width / imageWidth, rect.height / image.height) * .88 * this.zoom;
+    const size = [imageWidth * scale, image.height * scale];
     const center = [rect.width / 2 + this.pan[0], rect.height / 2 + this.pan[1]];
-    const overlay = this.overlay && this.layer !== 'mask';
+    const overlay = !input && this.overlay && this.layer !== 'mask';
     if (this.gl) {
       const gl = this.gl;
       if (gl.isContextLost()) return;
@@ -195,10 +215,10 @@ export class RasterViewer {
       gl.bindTexture(gl.TEXTURE_2D, this.textures[this.layer]);
       gl.uniform1i(this.uniforms.image, 0);
       gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, this.textures.mask);
+      gl.bindTexture(gl.TEXTURE_2D, input ? this.textures.empty : this.textures.mask);
       gl.uniform1i(this.uniforms.mask, 1);
       gl.activeTexture(gl.TEXTURE2);
-      gl.bindTexture(gl.TEXTURE_2D, this.textures.aoi);
+      gl.bindTexture(gl.TEXTURE_2D, input ? this.textures.empty : this.textures.aoi);
       gl.uniform1i(this.uniforms.aoi, 2);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     } else {
@@ -216,7 +236,7 @@ export class RasterViewer {
         ctx.globalAlpha = 1;
       }
       ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(this.images.aoi, ...args);
+      if (!input && this.images.aoi) ctx.drawImage(this.images.aoi, ...args);
     }
   }
 }

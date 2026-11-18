@@ -84,6 +84,20 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
     page.locator("#close-help").click()
     page.locator("#analyze-button").click()
     expect(page.locator("#error-message")).to_contain_text("هر دو فایل")
+    page.locator("#dem-file").set_input_files(root / "dem_10m.tif")
+    expect(page.locator('[data-input-layer="dem"]')).to_be_enabled(timeout=30000)
+    expect(page.locator("#viewer-status")).to_contain_text("dem_10m.tif")
+    expect(page.locator("#map-canvas")).to_be_visible()
+    expect(page.locator("#result-details")).to_be_hidden()
+    expect(page.locator("#stat-pixels")).to_have_text("—")
+    page.locator("#dsm-file").set_input_files(root / "dsm_05m.tif")
+    expect(page.locator('[data-input-layer="dsm"]')).to_be_enabled(timeout=30000)
+    expect(page.locator("#viewer-status")).to_contain_text("dsm_05m.tif")
+    page.locator('[data-input-layer="dem"]').click()
+    expect(page.locator("#viewer-status")).to_contain_text("dem_10m.tif")
+    page.screenshot(path=str(ARTIFACTS / "input-preview-before-extraction.png"), full_page=True)
+    page.locator("#dem-remove").click()
+    page.locator("#dsm-remove").click()
     page.locator("#demo-button").click()
     expect(page.locator("#result-details")).to_be_visible(timeout=30000)
     expect(page.locator("#processing-overlay")).to_be_hidden(timeout=30000)
@@ -119,6 +133,22 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
     expect(page.locator("#alignment-info")).to_contain_text("درون‌یابی دوخطی")
     expect(page.locator("#error-message")).to_be_hidden()
     page.screenshot(path=str(ARTIFACTS / "desktop-upload.png"), full_page=True)
+    expect(page.locator("#attribute-preview")).to_be_visible()
+    expect(page.locator("#attribute-count")).to_contain_text("۱ عارضه")
+    with page.expect_download() as shape_download:
+        page.locator("#download-shapefile").click()
+    shape_download.value.save_as(str(ARTIFACTS / "features.zip"))
+    with ZipFile(ARTIFACTS / "features.zip") as archive:
+        from io import BytesIO
+
+        with shapefile.Reader(
+            shp=BytesIO(archive.read("features_001.shp")),
+            shx=BytesIO(archive.read("features_001.shx")),
+            dbf=BytesIO(archive.read("features_001.dbf")),
+        ) as reader:
+            assert len(reader) == 1
+            assert reader.record(0).as_dict()["H_MAX_M"] == 50
+            assert reader.record(0).as_dict()["PIXELS"] == 400
     page.locator("#aoi-files").set_input_files(root / "boundary.zip")
     expect(page.locator("#aoi-name")).to_have_text("boundary.zip")
     expect(page.locator("#stale-notice")).to_be_visible()
@@ -161,6 +191,8 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
                 "status": "passed",
                 "checks": [
                     "demo",
+                    "input previews before extraction",
+                    "attributed shapefile download",
                     "real upload at 10m/0.5m",
                     "AOI ZIP and shapefile components",
                     "AOI crop and downloaded pixel values",

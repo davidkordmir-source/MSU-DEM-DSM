@@ -1,10 +1,20 @@
 """Stream a ZIP64 download without duplicating large rasters on the work disk."""
 
 import io
+import re
 from pathlib import Path
 from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
 RESULT_FILES = ("height.tif", "extracted.tif", "mask.tif", "report.json")
+VECTOR_FILE = re.compile(r"features_[0-9]{3,}\.(shp|shx|dbf|prj|cpg)")
+
+
+def vector_files(directory):
+    return tuple(sorted(p.name for p in directory.iterdir() if p.is_file() and VECTOR_FILE.fullmatch(p.name)))
+
+
+def result_files(directory, *, vector_only=False):
+    return (("report.json",) if vector_only else RESULT_FILES) + vector_files(directory)
 
 
 class _Buffer(io.RawIOBase):
@@ -29,10 +39,10 @@ class _Buffer(io.RawIOBase):
         return data
 
 
-def stream_results(directory: Path):
+def stream_results(directory: Path, *, vector_only=False):
     buffer = _Buffer()
     with ZipFile(buffer, "w", compression=ZIP_STORED, allowZip64=True) as archive:
-        for name in RESULT_FILES:
+        for name in result_files(directory, vector_only=vector_only):
             path = directory / name
             info = ZipInfo.from_file(path, arcname=name)
             with path.open("rb") as source, archive.open(info, "w", force_zip64=True) as target:

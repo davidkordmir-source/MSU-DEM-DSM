@@ -3,7 +3,7 @@ Target amd64-unicode
 !include "MUI2.nsh"
 !include "x64.nsh"
 Name "MSU Terrain"
-OutFile "../downloads/MSU-Terrain-Setup-0.3.0-x64.exe"
+OutFile "../downloads/MSU-Terrain-Setup-0.4.0-x64.exe"
 InstallDir "$LOCALAPPDATA\Programs\MSU Terrain"
 InstallDirRegKey HKCU "Software\MSU Terrain" "InstallDir"
 RequestExecutionLevel user
@@ -11,11 +11,11 @@ SetCompressor /SOLID lzma
 SetCompressorDictSize 32
 Icon "../app/static/brand/app.ico"
 UninstallIcon "../app/static/brand/app.ico"
-VIProductVersion "0.3.0.0"
+VIProductVersion "0.4.0.0"
 VIAddVersionKey "ProductName" "MSU Terrain"
 VIAddVersionKey "FileDescription" "MSU Terrain Offline Desktop Setup"
-VIAddVersionKey "FileVersion" "0.3.0"
-VIAddVersionKey "ProductVersion" "0.3.0"
+VIAddVersionKey "FileVersion" "0.4.0"
+VIAddVersionKey "ProductVersion" "0.4.0"
 VIAddVersionKey "LegalCopyright" "MSU Terrain"
 
 !define MUI_ABORTWARNING
@@ -67,7 +67,7 @@ Section "MSU Terrain" SEC_APP
   CreateShortCut "$SMPROGRAMS\MSU Terrain\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "Software\MSU Terrain" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MSU Terrain" "DisplayName" "MSU Terrain"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MSU Terrain" "DisplayVersion" "0.3.0"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MSU Terrain" "DisplayVersion" "0.4.0"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MSU Terrain" "Publisher" "MSU Terrain"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MSU Terrain" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MSU Terrain" "DisplayIcon" "$INSTDIR\MSU-Terrain.exe,0"

@@ -19,7 +19,8 @@ from fastapi.staticfiles import StaticFiles
 from app.aoi import EXTENSIONS, MAX_AOI_BYTES
 from app.demo import make_demo
 from app.desktop import pick_output_directory, pick_raster
-from app.downloads import RESULT_FILES, stream_results
+from app.downloads import VECTOR_FILE, result_files, stream_results, vector_files
+from app.previews import build_preview
 from app.processing import ProcessingError, process_rasters
 from app.resources import resource_budget
 
@@ -32,6 +33,7 @@ FILES = {
     "mask.tif": "image/tiff",
     "report.json": "application/json",
     "results.zip": "application/zip",
+    "features.zip": "application/zip",
     "height.png": "image/png",
     "mask.png": "image/png",
     "surface.png": "image/png",
@@ -47,8 +49,12 @@ async def lifespan(app: FastAPI):
     DATA.mkdir(parents=True, exist_ok=True)
     # One raster job at a time can use all available cores without oversubscription.
     app.state.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="raster")
+    app.state.preview_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="preview")
+    app.state.previews = {}
+    app.state.uploaded_rasters = {}
     yield
     app.state.executor.shutdown(wait=True)
+    app.state.preview_executor.shutdown(wait=True)
 
 
 app = FastAPI(title="MSU Terrain · DEM / DSM", lifespan=lifespan, docs_url=None, redoc_url=None)
@@ -124,11 +130,93 @@ def select_local_raster(request: Request, kind: str = "dem"):
 
 
 def _local_path(request: Request, token: str) -> Path:
-    _require_desktop(request)
-    path = getattr(request.app.state, "local_rasters", {}).get(token)
+    path = request.app.state.uploaded_rasters.get(token)
+    if path is not None and path.is_file():
+        path.parent.touch()
+    if path is None:
+        _require_desktop(request)
+        path = getattr(request.app.state, "local_rasters", {}).get(token)
     if path is None or not path.is_file():
         raise HTTPException(422, "فایل انتخاب‌شده در دسترس نیست؛ دوباره آن را انتخاب کنید.")
     return path
+
+
+@app.post("/api/inputs", status_code=201)
+async def stage_input(request: Request, file: Annotated[UploadFile, File()]):
+    name = Path((file.filename or "").replace("\\", "/")).name
+    if Path(name).suffix.lower() not in (".tif", ".tiff"):
+        raise HTTPException(422, "فایل باید TIF یا TIFF باشد.")
+    token = uuid4().hex
+    directory = DATA / "inputs" / token
+    directory.mkdir(parents=True)
+    path = directory / name
+    try:
+        size = await _save_upload(file, path)
+        request.app.state.uploaded_rasters[token] = path
+        return {"token": token, "name": name, "size": size}
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+    finally:
+        await file.close()
+
+
+@app.post("/api/previews", status_code=202)
+def start_preview(request: Request, token: Annotated[str, Form()]):
+    path = _local_path(request, token)
+    registry = request.app.state.previews
+    with lock:
+        for preview in registry.values():
+            if preview["token"] == token:
+                return {"id": preview["id"]}
+        if sum(p["status"] in ("queued", "processing") for p in registry.values()) >= 6:
+            raise HTTPException(429, "چند پیش‌نمایش در صف است؛ کمی بعد دوباره فایل را انتخاب کنید.")
+        identity = uuid4().hex
+        directory = DATA / "previews" / identity
+        directory.mkdir(parents=True)
+        entry = {"id": identity, "token": token, "status": "queued", "progress": 0}
+        registry[identity] = entry
+
+    def generate():
+        try:
+            with lock:
+                entry["status"] = "processing"
+
+            def progress(value, message):
+                with lock:
+                    entry.update(progress=value, message=message)
+
+            result = build_preview(path, directory, progress)
+            result["filename"] = path.name
+            with lock:
+                entry.update(status="complete", progress=100, result=result)
+        except Exception as exc:
+            logger.exception("Input preview failed")
+            with lock:
+                entry.update(
+                    status="error",
+                    message=str(exc) if isinstance(exc, ProcessingError) else "پیش‌نمایش فایل ساخته نشد.",
+                )
+
+    request.app.state.preview_executor.submit(generate)
+    return {"id": identity}
+
+
+@app.get("/api/previews/{preview_id}")
+def get_preview(request: Request, preview_id: str):
+    with lock:
+        entry = request.app.state.previews.get(preview_id)
+        if entry is None:
+            raise HTTPException(404, "پیش‌نمایش یافت نشد.")
+        return {k: v for k, v in entry.items() if k != "token"}
+
+
+@app.get("/api/previews/{preview_id}/image.png")
+def preview_image(request: Request, preview_id: str):
+    entry = get_preview(request, preview_id)
+    if entry["status"] != "complete":
+        raise HTTPException(404, "پیش‌نمایش هنوز آماده نیست.")
+    return FileResponse(DATA / "previews" / preview_id / "preview.png", media_type="image/png")
 
 
 @app.post("/api/desktop/pick-output")
@@ -163,6 +251,33 @@ def _cleanup() -> None:
             if not active and path.stat().st_mtime < cutoff:
                 shutil.rmtree(path, ignore_errors=True)
                 jobs.pop(path.name, None)
+    with lock:
+        active_inputs = {
+            Path(source).parent
+            for job in jobs.values()
+            if job["status"] in ("uploading", "queued", "processing")
+            for source in job.get("input_paths", [])
+        }
+        previews = getattr(app.state, "previews", {})
+        uploaded = getattr(app.state, "uploaded_rasters", {})
+        for preview in previews.values():
+            if preview["status"] in ("queued", "processing") and preview["token"] in uploaded:
+                active_inputs.add(uploaded[preview["token"]].parent)
+        for category in ("inputs", "previews"):
+            root = DATA / category
+            if not root.exists():
+                continue
+            for directory in root.iterdir():
+                if not directory.is_dir() or not re.fullmatch(r"[a-f0-9]{32}", directory.name):
+                    continue
+                active = (
+                    directory in active_inputs
+                    if category == "inputs"
+                    else previews.get(directory.name, {}).get("status") in ("queued", "processing")
+                )
+                if not active and directory.stat().st_mtime < cutoff:
+                    shutil.rmtree(directory, ignore_errors=True)
+                    (uploaded if category == "inputs" else previews).pop(directory.name, None)
 
 
 def _reserve() -> tuple[str, Path]:
@@ -321,7 +436,7 @@ async def create_job(
         if aoi_files:
             await _save_aoi(aoi_files, directory / "aoi")
             options["aoi_directory"] = directory / "aoi"
-        _update(job_id, status="queued", message="در صف پردازش")
+        _update(job_id, status="queued", message="در صف پردازش", input_paths=[str(p) for p in sources])
         request.app.state.executor.submit(
             _run, job_id, directory, options, sources=tuple(sources), destination=destination
         )
@@ -367,22 +482,27 @@ def get_job(job_id: str):
 @app.get("/api/jobs/{job_id}/files/{filename}")
 def download(job_id: str, filename: str):
     job = get_job(job_id)
-    if job["status"] != "complete" or filename not in FILES:
+    if job["status"] != "complete" or (filename not in FILES and not VECTOR_FILE.fullmatch(filename)):
         raise HTTPException(404, "خروجی هنوز آماده نیست.")
     directory = Path(job.get("output_directory", DATA / job_id / "output"))
-    if filename == "results.zip":
-        if not all((directory / name).is_file() for name in RESULT_FILES):
+    if filename in ("results.zip", "features.zip"):
+        vector_only = filename == "features.zip"
+        if (vector_only and not vector_files(directory)) or not all(
+            (directory / name).is_file() for name in result_files(directory, vector_only=vector_only)
+        ):
             raise HTTPException(404, "فایل خروجی در دسترس نیست.")
         return StreamingResponse(
-            stream_results(directory),
+            stream_results(directory, vector_only=vector_only),
             media_type="application/zip",
-            headers={"Content-Disposition": 'attachment; filename="results.zip"'},
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
     path = directory / filename
     if not path.is_file():
         raise HTTPException(404, "فایل خروجی در دسترس نیست.")
     return FileResponse(
-        path, media_type=FILES[filename], filename=filename if not filename.endswith(".png") else None
+        path,
+        media_type=FILES.get(filename, "application/octet-stream"),
+        filename=filename if not filename.endswith(".png") else None,
     )
 
 

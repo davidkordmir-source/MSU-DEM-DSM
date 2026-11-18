@@ -8,6 +8,9 @@ let busy = false;
 let completed = false;
 let desktopSession = null;
 let outputFolder = null;
+let activeInput = null;
+let lastResult = null;
+const inputPreviews = { dem: null, dsm: null };
 const viewer = new RasterViewer($('map-canvas'), $('renderer-status'));
 
 function showError(message) {
@@ -30,6 +33,26 @@ function setFile(kind, file) {
     return;
   }
   files[kind] = file;
+  inputPreviews[kind] = null;
+  document.querySelector('[data-input-layer="' + kind + '"]').disabled = true;
+  if (file) {
+    activeInput = kind;
+    $('input-preview-status').textContent = 'آماده‌سازی پیش‌نمایش ' + kind.toUpperCase() + '…';
+    file.ready = file.localToken ? Promise.resolve(file.localToken) : stageInput(file);
+    file.ready.then(token => requestInputPreview(kind, file, token)).catch(error => {
+      if (files[kind] === file && activeInput === kind) $('input-preview-status').textContent = error.message;
+    });
+  } else if (viewer.layer === 'input_' + kind) {
+    const other = kind === 'dem' ? 'dsm' : 'dem';
+    if (inputPreviews[other]) activateInput(other);
+    else if (lastResult) activateResult('height');
+    else {
+      viewer.canvas.hidden = true;
+      $('empty-state').hidden = false;
+      $('map-controls').hidden = true;
+      $('input-preview-status').textContent = '';
+    }
+  }
   $(`${kind}-name`).textContent = file?.name || (kind === 'dem' ? 'فایل زمین را انتخاب کنید' : 'فایل سطح را انتخاب کنید');
   $(`${kind}-name`).dir = file ? 'auto' : 'rtl';
   $(`${kind}-size`).textContent = file ? `${number(file.size / 1024 ** 2, 2)} مگابایت · ${file.localToken ? 'خواندن مستقیم از دیسک' : 'آمادهٔ پردازش'}` : 'یا فایل را اینجا رها کنید';
@@ -38,6 +61,73 @@ function setFile(kind, file) {
   if (!file) $(`${kind}-file`).value = '';
   $('error-message').hidden = true;
   markStale();
+}
+
+async function stageInput(file) {
+  const form = new FormData();
+  form.append('file', file);
+  const info = await responseJSON(await fetch('/api/inputs', { method: 'POST', body: form }));
+  file.inputToken = info.token;
+  return info.token;
+}
+
+async function requestInputPreview(kind, file, token) {
+  if (files[kind] !== file) return;
+  const form = new FormData();
+  form.append('token', token);
+  const headers = desktopSession ? { 'X-MSU-Session': desktopSession } : {};
+  const entry = await responseJSON(await fetch('/api/previews', { method: 'POST', body: form, headers }));
+  while (files[kind] === file) {
+    const status = await responseJSON(await fetch('/api/previews/' + entry.id));
+    if (status.status === 'error') throw new Error(status.message);
+    if (status.status === 'complete') {
+      await viewer.loadInput(kind, '/api/previews/' + entry.id + '/image.png', status.result.aspect, () => files[kind] === file);
+      if (files[kind] !== file) return;
+      inputPreviews[kind] = status.result;
+      document.querySelector('[data-input-layer="' + kind + '"]').disabled = false;
+      if (activeInput === kind && !busy) activateInput(kind);
+      return;
+    }
+    if (activeInput === kind) $('input-preview-status').textContent = 'پیش‌نمایش ' + kind.toUpperCase() + ' · ' + number(status.progress, 0) + '٪';
+    await new Promise(resolve => setTimeout(resolve, 350));
+  }
+}
+
+function activateInput(kind) {
+  const info = inputPreviews[kind];
+  if (!info) return;
+  activeInput = kind;
+  viewer.setLayer('input_' + kind);
+  viewer.reset();
+  $('empty-state').hidden = true;
+  $('map-controls').hidden = false;
+  $('mask-toggle').hidden = true;
+  $('aoi-legend').hidden = true;
+  $('demo-badge').hidden = true;
+  $('viewer-status').textContent = 'ورودی ' + kind.toUpperCase() + ' · ' + files[kind].name;
+  $('map-resolution').textContent = number(info.width, 0) + ' × ' + number(info.height, 0) + ' پیکسل';
+  $('grid-info').textContent = info.crs;
+  $('input-preview-status').textContent = info.note + (info.valid_samples ? '' : ' نمونهٔ معتبر در نمای سریع پیدا نشد.');
+  document.querySelectorAll('[data-layer]').forEach(button => button.classList.remove('active'));
+  document.querySelectorAll('[data-input-layer]').forEach(button => button.classList.toggle('active', button.dataset.inputLayer === kind));
+}
+
+function activateResult(layer) {
+  activeInput = null;
+  viewer.setLayer(layer);
+  viewer.reset();
+  $('mask-toggle').hidden = layer === 'mask';
+  $('input-preview-status').textContent = '';
+  document.querySelectorAll('[data-input-layer]').forEach(button => button.classList.remove('active'));
+  document.querySelectorAll('[data-layer]').forEach(button => button.classList.toggle('active', button.dataset.layer === layer));
+  if (lastResult) {
+    const result = lastResult.result;
+    $('grid-info').textContent = result.grid.crs;
+    $('map-resolution').textContent = number(result.grid.width, 0) + ' × ' + number(result.grid.height, 0) + ' پیکسل · نتیجهٔ استخراج';
+    $('viewer-status').textContent = 'ارتفاع از زمین ' + result.comparison + ' ' + number(result.threshold_m) + ' متر';
+    $('aoi-legend').hidden = !result.aoi;
+    $('demo-badge').hidden = !lastResult.demo;
+  }
 }
 
 for (const kind of ['dem', 'dsm']) {
@@ -202,9 +292,10 @@ async function run(demo = false) {
     if (demo) {
       result = await responseJSON(await fetch(`/api/demo?threshold=${encodeURIComponent(threshold)}&inclusive=${$('inclusive').checked}`, { method: 'POST' }));
     } else {
+      await Promise.all([files.dem.ready, files.dsm.ready]);
       const form = new FormData();
       for (const kind of ['dem', 'dsm']) {
-        if (files[kind].localToken) form.append(`${kind}_token`, files[kind].localToken);
+        if (files[kind].localToken || files[kind].inputToken) form.append(`${kind}_token`, files[kind].localToken || files[kind].inputToken);
         else form.append(kind, files[kind]);
       }
       form.append('threshold', threshold);
@@ -238,6 +329,20 @@ function resolutionLabel(input) { return `${input.resolution.map(x => number(x, 
 
 async function showResult(job) {
   const result = job.result;
+  lastResult = job;
+  $('download-shapefile').href = '/api/jobs/' + job.id + '/files/features.zip';
+  $('download-shapefile').hidden = !result.vector;
+  $('attribute-preview').hidden = !result.vector;
+  $('attribute-count').textContent = result.vector ? number(result.vector.feature_count, 0) + ' عارضه · نمایش حداکثر ۲۰ ردیف' : '';
+  $('attribute-rows').replaceChildren(...(result.vector?.sample || []).map(row => {
+    const tr = document.createElement('tr');
+    for (const name of ['OBJ_ID', 'PIXELS', 'H_MIN_M', 'H_MAX_M', 'H_MEAN_M', 'AREA_M2']) {
+      const td = document.createElement('td');
+      td.textContent = number(row[name], 3);
+      tr.append(td);
+    }
+    return tr;
+  }));
   $('retention-note').textContent = job.permanent_output ? 'نتایج در ' + job.output_directory + ' ذخیره شدند و خودکار پاک نمی‌شوند.' : 'نتایج موقت تا ۲۴ ساعت نگهداری می‌شوند؛ خروجی‌های موردنیاز را دریافت کنید.';
   const url = `/api/jobs/${job.id}/files`;
   $('stat-pixels').textContent = number(result.selected_pixels, 0);
@@ -290,6 +395,7 @@ async function showResult(job) {
   // Downloads and numerical results remain usable if image loading fails.
   try {
     await viewer.load(url);
+    activateResult('height');
     $('empty-state').hidden = true;
     $('map-controls').hidden = false;
     $('mask-toggle').hidden = viewer.layer === 'mask';
@@ -298,10 +404,9 @@ async function showResult(job) {
 }
 
 document.querySelectorAll('[data-layer]').forEach(button => button.addEventListener('click', () => {
-  document.querySelectorAll('[data-layer]').forEach(item => item.classList.toggle('active', item === button));
-  viewer.setLayer(button.dataset.layer);
-  $('mask-toggle').hidden = button.dataset.layer === 'mask';
+  activateResult(button.dataset.layer);
 }));
+document.querySelectorAll('[data-input-layer]').forEach(button => button.addEventListener('click', () => activateInput(button.dataset.inputLayer)));
 $('show-mask').addEventListener('change', event => viewer.setOverlay(event.target.checked));
 $('zoom-in').addEventListener('click', () => viewer.zoomBy(1.4));
 $('zoom-out').addEventListener('click', () => viewer.zoomBy(1 / 1.4));

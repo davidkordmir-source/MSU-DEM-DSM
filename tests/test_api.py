@@ -48,6 +48,11 @@ def test_demo_download_and_restart_recovery(client):
         assert "extracted.tif" in archive.namelist()
         assert archive.testzip() is None
     assert not (main.DATA / job_id / "output/results.zip").exists()
+    vector = client.get(f"/api/jobs/{job_id}/files/features.zip")
+    with ZipFile(BytesIO(vector.content)) as archive:
+        assert "features_001.shp" in archive.namelist()
+        assert "features_001.dbf" in archive.namelist()
+        assert "height.tif" not in archive.namelist()
     main.jobs.clear()
     assert client.get(f"/api/jobs/{job_id}").json()["status"] == "complete"
     assert client.get(f"/api/jobs/{job_id}/files/unexpected.txt").status_code == 404
@@ -193,3 +198,37 @@ def test_selected_output_drive_is_permanent(raster, client, monkeypatch, tmp_pat
     assert not (main.DATA / job["id"]).exists()
     assert (output / "height.tif").is_file()
     assert sentinel.read_text() == "keep"
+
+
+def test_staged_inputs_preview_and_reuse_without_second_upload(raster, client):
+    tokens = []
+    for name, heights in (("dem.tif", [[-100, -100]]), ("dsm.tif", [[-50, 900]])):
+        path = raster(name, heights)
+        uploaded = client.post("/api/inputs", files={"file": (name, path.read_bytes())})
+        assert uploaded.status_code == 201
+        token = uploaded.json()["token"]
+        tokens.append(token)
+        response = client.post("/api/previews", data={"token": token})
+        assert response.status_code == 202
+        preview_id = response.json()["id"]
+        for _ in range(100):
+            preview = client.get(f"/api/previews/{preview_id}").json()
+            if preview["status"] in ("complete", "error"):
+                break
+            time.sleep(0.02)
+        assert preview["status"] == "complete", preview
+        assert preview["result"]["valid_samples"] == 2
+        assert client.get(f"/api/previews/{preview_id}/image.png").content.startswith(b"\x89PNG")
+        assert not main.jobs  # No extraction required for an input preview.
+    response = client.post(
+        "/api/jobs", data={"dem_token": tokens[0], "dsm_token": tokens[1], "same_datum": True}
+    )
+    job = await_job(client, response.json()["id"])
+    assert job["status"] == "complete", job
+    assert job["result"]["vector"]["sample"][0]["H_MAX_M"] == 1000
+    assert not (main.DATA / job["id"] / "dem.tif").exists()
+
+
+def test_preview_requires_a_registered_source(client):
+    assert client.post("/api/previews", data={"token": "/etc/passwd"}).status_code == 403
+    assert client.get("/api/previews/unknown/image.png").status_code == 404
