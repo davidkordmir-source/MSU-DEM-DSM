@@ -14,7 +14,8 @@ def vector_files(directory):
 
 
 def result_files(directory, *, vector_only=False):
-    return (("report.json",) if vector_only else RESULT_FILES) + vector_files(directory)
+    diagnostics = tuple(name for name in ("ground.tif", "ground_quality.tif") if (directory / name).is_file())
+    return (("report.json",) if vector_only else RESULT_FILES + diagnostics) + vector_files(directory)
 
 
 class _Buffer(io.RawIOBase):

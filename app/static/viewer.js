@@ -136,8 +136,8 @@ export class RasterViewer {
     this.textures[name] = texture;
   }
 
-  async load(baseUrl) {
-    const entries = await Promise.all(['height', 'surface', 'mask', 'aoi'].map(name => new Promise((resolve, reject) => {
+  async load(baseUrl, ground = false) {
+    const entries = await Promise.all(['height', 'surface', 'mask', 'aoi', ...(ground ? ['ground'] : [])].map(name => new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => resolve([name, img]);
       img.onerror = () => reject(new Error('پیش‌نمایش دریافت نشد؛ خروجی‌ها همچنان قابل دریافت هستند.'));

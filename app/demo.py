@@ -6,11 +6,9 @@ from rasterio.transform import from_origin
 
 
 def make_demo(directory: Path) -> tuple[Path, Path]:
-    """A synthetic survey below sea level, including exact 30 m and 50 m objects."""
+    """A synthetic flat urban survey below sea level, including exact 30 m and 50 m objects."""
     directory.mkdir(parents=True, exist_ok=True)
-    rows, cols = np.mgrid[:360, :480]
-    dem = (-100 + 5 * np.sin(cols / 100) * np.cos(rows / 85)).astype("float32")
-    dem = np.round(dem * 8) / 8  # Exact binary fractions keep synthetic height boundaries exact.
+    dem = np.full((360, 480), -100, dtype="float32")
     height = np.zeros_like(dem)
     blocks = [
         (50, 100, 55, 120, 50),

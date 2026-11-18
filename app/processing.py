@@ -68,8 +68,24 @@ def choose_resampling(dem, dsm, method: str) -> tuple[str, bool]:
     return ("average" if target_area > source_area * 1.01 else "bilinear"), False
 
 
-def _preview(path: Path, out: Path, kind: str, max_size: int, *, window=None, validity=None) -> None:
-    with rasterio.open(path) as src:
+def _preview(
+    path: Path, out: Path, kind: str, max_size: int, *, window=None, validity=None, reference=None
+) -> None:
+    with ExitStack() as stack:
+        src = stack.enter_context(rasterio.open(path))
+        if reference:
+            ref = stack.enter_context(rasterio.open(reference))
+            src = stack.enter_context(
+                WarpedVRT(
+                    src,
+                    crs=ref.crs,
+                    transform=ref.transform,
+                    width=ref.width,
+                    height=ref.height,
+                    resampling=Resampling.bilinear,
+                    nodata=float("nan"),
+                )
+            )
         width, height = (window.width, window.height) if window else (src.width, src.height)
         scale = min(1, max_size / max(width, height))
         shape = (max(1, round(height * scale)), max(1, round(width * scale)))
@@ -115,6 +131,7 @@ def process_rasters(
     progress: Callable[[int, str], None] = lambda *_: None,
     filenames: tuple[str, str] = ("dem.tif", "dsm.tif"),
     aoi_directory: Path | None = None,
+    ground_metadata: dict | None = None,
 ) -> dict:
     if not math.isfinite(threshold) or threshold < 0:
         raise ProcessingError("آستانه باید عددی متناهی و نامنفی بر حسب متر باشد.")
@@ -150,7 +167,14 @@ def process_rasters(
             width, height = int(source_window.width), int(source_window.height)
             output_transform = dsm.window_transform(source_window)
             vectors = stack.enter_context(
-                VectorBuilder(output, output_transform, dsm.crs, threshold, inclusive)
+                VectorBuilder(
+                    output,
+                    output_transform,
+                    dsm.crs,
+                    threshold,
+                    inclusive,
+                    ground_source="DSM_EST" if ground_metadata else "DEM",
+                )
             )
             method, aligned = choose_resampling(dem, dsm, resampling)
             # Three uncompressed rasters need 9 bytes/pixel. ZIP is streamed on demand.
@@ -180,9 +204,25 @@ def process_rasters(
                 )
             )
             info = {
-                "dem": raster_info(dem, dem_unit, filenames[0]),
+                "ground" if ground_metadata else "dem": raster_info(dem, dem_unit, filenames[0]),
                 "dsm": raster_info(dsm, dsm_unit, filenames[1]),
             }
+            support = None
+            if ground_metadata:
+                codes = stack.enter_context(rasterio.open(output / "ground_quality.tif"))
+                support = stack.enter_context(
+                    WarpedVRT(
+                        codes,
+                        crs=dsm.crs,
+                        transform=dsm.transform,
+                        width=dsm.width,
+                        height=dsm.height,
+                        resampling=Resampling.nearest,
+                        nodata=0,
+                        warp_mem_limit=budget["warp_memory_mb"],
+                        NUM_THREADS=str(budget["cpu_threads"]),
+                    )
+                )
             profile = {
                 "driver": "GTiff",
                 "width": width,
@@ -213,7 +253,9 @@ def process_rasters(
                 writers[name].set_band_description(
                     1,
                     {
-                        "height": "DSM minus DEM, metres above local ground",
+                        "height": "DSM minus estimated ground, metres"
+                        if ground_metadata
+                        else "DSM minus DEM, metres",
                         "extracted": "Selected height above local ground in metres",
                         "mask": "1=selected, 0=not selected, 255=invalid or no overlap",
                     }[name],
@@ -225,8 +267,10 @@ def process_rasters(
                     comparison=">=" if inclusive else ">",
                     dem_resampling=method,
                     vertical_reference="local_ground",
+                    ground_source="DSM_EST" if ground_metadata else "DEM",
                 )
             valid_count = selected_count = negative_count = inside_count = 0
+            weak_selected_count = 0
             selected_sum = 0.0
             selected_min, selected_max = math.inf, -math.inf
             histogram_edges = np.array([0, 5, 10, 20, 30, 50, 75, 100, np.inf])
@@ -286,7 +330,12 @@ def process_rasters(
                     )
                     delta = heights - threshold
                     selected = valid & (delta >= -epsilon if inclusive else delta > epsilon)
-                    vectors.add(window, selected, heights)
+                    weak = None
+                    if support:
+                        codes = support.read(1, window=read_window)
+                        weak = (codes == 0) | (codes == 3)
+                        weak_selected_count += int((selected & weak).sum())
+                    vectors.add(window, selected, heights, weak)
                     valid_count += int(valid.sum())
                     selected_count += int(selected.sum())
                     negative_count += int((valid & (heights < 0)).sum())
@@ -314,9 +363,23 @@ def process_rasters(
                 pixel_area = abs(dsm.transform.determinant) * dsm.crs.linear_units_factor[1] ** 2
             warnings = [
                 "ارتفاع نسبی به‌تنهایی ساختمان را از درخت یا سایر عوارض بلند تفکیک نمی‌کند.",
-                "دو ورودی باید مبنای ارتفاعی یکسان داشته باشند؛ تبدیل مبنای ارتفاعی انجام نمی‌شود.",
             ]
-            if not aligned:
+            if ground_metadata:
+                warnings.append(ground_metadata["limitation"])
+                warnings.append("کدهای پشتیبانی زمین، تشخیص داخلی مدل هستند؛ کد خوب هم تضمین صحت زمین نیست.")
+                if not dsm.crs.is_projected:
+                    warnings.append(
+                        "تخمین زمین در تصویر متری محلی انجام شد؛ برای محدوده‌های بسیار وسیع از برش‌های محلی استفاده کنید."
+                    )
+                if weak_selected_count:
+                    warnings.append(
+                        f"تخمین زمین در {weak_selected_count} پیکسل منتخب پشتیبانی محدودی دارد؛ WEAK_PX را بررسی کنید."
+                    )
+            else:
+                warnings.append(
+                    "دو ورودی باید مبنای ارتفاعی یکسان داشته باشند؛ تبدیل مبنای ارتفاعی انجام نمی‌شود."
+                )
+            if not aligned and not ground_metadata:
                 warnings.append(
                     "DEM روی شبکهٔ DSM بازنمونه‌برداری شد؛ این تبدیل دقت واقعی دادهٔ مبنا را افزایش نمی‌دهد."
                 )
@@ -337,7 +400,9 @@ def process_rasters(
                 "vector": vector_report,
                 "threshold_m": threshold,
                 "comparison": ">=" if inclusive else ">",
-                "formula": "DSM - DEM",
+                "formula": "DSM - estimated ground" if ground_metadata else "DSM - DEM",
+                "ground_estimation": ground_metadata,
+                "weak_selected_pixels": weak_selected_count,
                 "resampling": method,
                 "aligned": aligned,
                 "inputs": info,
@@ -380,6 +445,15 @@ def process_rasters(
             window=source_window,
             validity=output / "height.tif",
         )
+        if ground_metadata:
+            _preview(
+                output / "ground.tif",
+                output / "ground.png",
+                "surface",
+                budget["preview_max_size"],
+                reference=output / "height.tif",
+                validity=output / "height.tif",
+            )
         if aoi:
             with Image.open(output / "height.png") as preview:
                 pw, ph = preview.size
@@ -403,3 +477,56 @@ def process_rasters(
         raise ProcessingError(
             "خواندن یا تبدیل فایل ارتفاعی ممکن نشد؛ GeoTIFF، CRS و سلامت فایل را بررسی کنید."
         ) from exc
+
+
+def process_dsm(
+    dsm_path: Path,
+    output: Path,
+    *,
+    threshold=30,
+    inclusive=False,
+    dsm_unit="m",
+    ground_profile="urban",
+    max_object_width=200.0,
+    ground_grid=2.0,
+    filename="dsm.tif",
+    aoi_directory=None,
+    progress=lambda *_: None,
+):
+    from app.ground import build_ground
+
+    if not math.isfinite(threshold) or threshold < 0:
+        raise ProcessingError("آستانه باید عددی متناهی و نامنفی بر حسب متر باشد.")
+    started = time.monotonic()
+    progress(1, "آماده‌سازی تخمین زمین از یک DSM")
+    try:
+        metadata = build_ground(
+            dsm_path,
+            output,
+            dsm_unit=dsm_unit,
+            profile=ground_profile,
+            max_width=max_object_width,
+            grid_size=ground_grid,
+            aoi_directory=aoi_directory,
+            progress=lambda p, m: progress(1 + round(p * 0.39), m),
+        )
+        report = process_rasters(
+            output / "ground.tif",
+            dsm_path,
+            output,
+            threshold=threshold,
+            inclusive=inclusive,
+            dsm_unit=dsm_unit,
+            resampling="bilinear",
+            filenames=("ground.tif", filename),
+            aoi_directory=aoi_directory,
+            ground_metadata=metadata,
+            progress=lambda p, m: progress(40 + round(p * 0.6), m),
+        )
+    except RasterioError as exc:
+        raise ProcessingError(
+            "خواندن DSM برای تخمین زمین ممکن نشد؛ فایل و سیستم مختصات را بررسی کنید."
+        ) from exc
+    report["elapsed_seconds"] = round(time.monotonic() - started, 2)
+    (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report

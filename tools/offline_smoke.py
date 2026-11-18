@@ -23,7 +23,7 @@ from rasterio.transform import from_origin
 
 from app.demo import make_demo
 from app.previews import build_preview
-from app.processing import process_rasters
+from app.processing import process_dsm, process_rasters
 from app.resources import resource_budget
 
 for host in ("example.com", "1.1.1.1"):
@@ -38,7 +38,9 @@ assert os.environ["PROJ_NETWORK"] == "OFF"
 with tempfile.TemporaryDirectory() as temp:
     path = Path(temp)
     dem, dsm = make_demo(path)
-    report = process_rasters(dem, dsm, path / "demo-output")
+    report = process_dsm(dsm, path / "demo-output")
+    assert report["ground_estimation"]["estimated"]
+    assert report["ground_estimation"]["profile"] == "urban"
     assert report["selected_pixels"] == 28825
     assert report["max_height_m"] == 68
     assert report["vector"]["feature_count"] > 0
@@ -46,6 +48,7 @@ with tempfile.TemporaryDirectory() as temp:
         records = [record.as_dict() for record in reader.iterRecords()]
         assert sum(record["PIXELS"] for record in records) == 28825
         assert max(record["H_MAX_M"] for record in records) == 68
+        assert all(record["GND_SRC"] == "DSM_EST" for record in records)
     preview = path / "input-preview"
     preview.mkdir()
     info = build_preview(dsm, preview)
@@ -119,6 +122,7 @@ with tempfile.TemporaryDirectory() as temp:
                 "resources": resource_budget(),
                 "external_connections": "blocked",
                 "checks": [
+                    "DSM-only estimated ground with SciPy",
                     "negative elevations",
                     "10m vs 0.5m",
                     "shapefile AOI",

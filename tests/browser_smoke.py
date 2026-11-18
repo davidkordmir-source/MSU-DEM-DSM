@@ -36,7 +36,6 @@ def write_raster(path, values, resolution):
 
 with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
     root = Path(directory)
-    write_raster(root / "dem_10m.tif", np.full((3, 3), -100), 10)
     surface = np.full((60, 60), -100.0)
     surface[10:30, 10:30] = -50
     write_raster(root / "dsm_05m.tif", surface, 0.5)
@@ -83,20 +82,11 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
     expect(page.locator("#help-dialog")).to_be_visible()
     page.locator("#close-help").click()
     page.locator("#analyze-button").click()
-    expect(page.locator("#error-message")).to_contain_text("هر دو فایل")
-    page.locator("#dem-file").set_input_files(root / "dem_10m.tif")
-    expect(page.locator('[data-input-layer="dem"]')).to_be_enabled(timeout=30000)
-    expect(page.locator("#viewer-status")).to_contain_text("dem_10m.tif")
-    expect(page.locator("#map-canvas")).to_be_visible()
-    expect(page.locator("#result-details")).to_be_hidden()
-    expect(page.locator("#stat-pixels")).to_have_text("—")
+    expect(page.locator("#error-message")).to_contain_text("یک فایل DSM")
     page.locator("#dsm-file").set_input_files(root / "dsm_05m.tif")
     expect(page.locator('[data-input-layer="dsm"]')).to_be_enabled(timeout=30000)
     expect(page.locator("#viewer-status")).to_contain_text("dsm_05m.tif")
-    page.locator('[data-input-layer="dem"]').click()
-    expect(page.locator("#viewer-status")).to_contain_text("dem_10m.tif")
     page.screenshot(path=str(ARTIFACTS / "input-preview-before-extraction.png"), full_page=True)
-    page.locator("#dem-remove").click()
     page.locator("#dsm-remove").click()
     page.locator("#demo-button").click()
     expect(page.locator("#result-details")).to_be_visible(timeout=30000)
@@ -104,6 +94,8 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
     expect(page.locator("#map-canvas")).to_be_visible()
     expect(page.locator("#stat-max")).to_have_text("۶۸")
     expect(page.locator("#demo-badge")).to_be_visible()
+    page.locator('[data-layer="ground"]').click()
+    expect(page.locator("#viewer-status")).to_contain_text("زمین تخمینی")
     page.locator('[data-layer="surface"]').click()
     page.locator("#zoom-in").click()
     page.locator("#reset-view").click()
@@ -120,17 +112,13 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
     page.locator("#threshold").fill("40")
     expect(page.locator("#stale-notice")).to_be_visible()
     page.locator("#threshold").fill("30")
-    page.locator("#dem-file").set_input_files(root / "dem_10m.tif")
     page.locator("#dsm-file").set_input_files(root / "dsm_05m.tif")
-    page.locator("#analyze-button").click()
-    expect(page.locator("#error-message")).to_contain_text("مبنای ارتفاعی")
-    page.locator("#same-datum").check()
     page.locator("#analyze-button").click()
     expect(page.locator("#processing-overlay")).to_be_hidden(timeout=30000)
     expect(page.locator("#stat-pixels")).to_have_text("۴۰۰")
     expect(page.locator("#stat-area")).to_have_text("۱۰۰")
     expect(page.locator("#demo-badge")).to_be_hidden()
-    expect(page.locator("#alignment-info")).to_contain_text("درون‌یابی دوخطی")
+    expect(page.locator("#alignment-info")).to_contain_text("تخمین از DSM")
     expect(page.locator("#error-message")).to_be_hidden()
     page.screenshot(path=str(ARTIFACTS / "desktop-upload.png"), full_page=True)
     expect(page.locator("#attribute-preview")).to_be_visible()
@@ -149,6 +137,7 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
             assert len(reader) == 1
             assert reader.record(0).as_dict()["H_MAX_M"] == 50
             assert reader.record(0).as_dict()["PIXELS"] == 400
+            assert reader.record(0).as_dict()["GND_SRC"] == "DSM_EST"
     page.locator("#aoi-files").set_input_files(root / "boundary.zip")
     expect(page.locator("#aoi-name")).to_have_text("boundary.zip")
     expect(page.locator("#stale-notice")).to_be_visible()
@@ -164,6 +153,9 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
     with ZipFile(ARTIFACTS / "aoi-results.zip") as archive:
         report = json.loads(archive.read("report.json"))
         assert report["selected_pixels"] == 100
+        assert report["ground_estimation"]["estimated"]
+        assert "ground.tif" in archive.namelist()
+        assert "ground_quality.tif" in archive.namelist()
         with rasterio.MemoryFile(archive.read("height.tif")) as memory, memory.open() as output:
             assert output.shape == (10, 10)
             np.testing.assert_allclose(output.read(1), 50)
@@ -193,7 +185,8 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
                     "demo",
                     "input previews before extraction",
                     "attributed shapefile download",
-                    "real upload at 10m/0.5m",
+                    "single DSM, native 0.5m extraction",
+                    "estimated ground preview and diagnostics",
                     "AOI ZIP and shapefile components",
                     "AOI crop and downloaded pixel values",
                     "downloads",

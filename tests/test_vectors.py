@@ -84,7 +84,7 @@ def test_empty_shapefile_and_geographic_null_area(raster, tmp_path):
 
 
 def test_shapefile_rollover_preserves_all_ids(raster, tmp_path, monkeypatch):
-    monkeypatch.setattr(vectors, "SHAPEFILE_BYTES", 450)
+    monkeypatch.setattr(vectors, "SHAPEFILE_BYTES", 800)
     out = tmp_path / "out"
     report = process_rasters(
         raster("dem.tif", [[0] * 7]), raster("dsm.tif", [[50, 0, 60, 0, 70, 0, 80]]), out

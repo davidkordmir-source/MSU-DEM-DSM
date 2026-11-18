@@ -232,3 +232,83 @@ def test_staged_inputs_preview_and_reuse_without_second_upload(raster, client):
 def test_preview_requires_a_registered_source(client):
     assert client.post("/api/previews", data={"token": "/etc/passwd"}).status_code == 403
     assert client.get("/api/previews/unknown/image.png").status_code == 404
+
+
+def test_single_dsm_api_and_ground_downloads(raster, client):
+    import numpy as np
+
+    values = np.full((80, 100), -100.0)
+    values[30:50, 40:60] = -50
+    dsm = raster("city.tif", values)
+    response = client.post(
+        "/api/jobs", files={"dsm": (dsm.name, dsm.read_bytes())}, data={"max_object_width": 60}
+    )
+    assert response.status_code == 202
+    job = await_job(client, response.json()["id"])
+    assert job["status"] == "complete", job
+    assert job["result"]["selected_pixels"] == 400
+    assert job["result"]["ground_estimation"]["profile"] == "urban"
+    for name in ("ground.tif", "ground_quality.tif", "ground.png"):
+        assert client.get(f"/api/jobs/{job['id']}/files/{name}").status_code == 200
+    response = client.get(f"/api/jobs/{job['id']}/files/results.zip")
+    with ZipFile(BytesIO(response.content)) as archive:
+        assert "ground.tif" in archive.namelist()
+        assert "ground_quality.tif" in archive.namelist()
+        assert archive.testzip() is None
+    assert (
+        client.post(
+            "/api/jobs", files={"dsm": (dsm.name, dsm.read_bytes())}, data={"ground_grid": 0}
+        ).status_code
+        == 422
+    )
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="Linux sparse large-raster fixture; native Windows path checked separately"
+)
+def test_single_dsm_128_gib_large_grid_with_aoi(client, aoi, tmp_path, monkeypatch):
+    import numpy as np
+    from rasterio.transform import from_origin
+    from rasterio.windows import Window
+
+    dsm = tmp_path / "large-dsm.tif"
+    with rasterio.open(
+        dsm,
+        "w",
+        driver="GTiff",
+        width=262144,
+        height=131072,
+        count=1,
+        dtype="float32",
+        crs="EPSG:32639",
+        tiled=True,
+        blockxsize=512,
+        blockysize=512,
+        nodata=-9999,
+        sparse_ok=True,
+        BIGTIFF="YES",
+        transform=from_origin(500000, 4100000, 1, 1),
+    ) as dst:
+        values = np.full((256, 256), -100, dtype="float32")
+        values[100:140, 100:140] = -50
+        dst.write(values, 1, window=Window(0, 0, 256, 256))
+    with dsm.open("ab") as stream:
+        stream.truncate(128 * 1024**3)
+    area = aoi([box(500110, 4099870, 500130, 4099890)], zipped=True)
+    monkeypatch.setattr(main.app.state, "desktop_session", "single-large", raising=False)
+    monkeypatch.setattr(main, "pick_raster", lambda _title: dsm)
+    headers = {"X-MSU-Session": "single-large"}
+    token = client.post("/api/desktop/pick-raster?kind=dsm", headers=headers).json()["file"]["localToken"]
+    response = client.post(
+        "/api/jobs",
+        headers=headers,
+        data={"dsm_token": token, "max_object_width": 100},
+        files={"aoi_files": ("area.zip", (area / "area.zip").read_bytes())},
+    )
+    assert response.status_code == 202
+    job = await_job(client, response.json()["id"])
+    assert job["status"] == "complete", job
+    assert job["result"]["selected_pixels"] == 400
+    assert job["result"]["max_height_m"] == 50
+    assert not (main.DATA / job["id"] / "dsm.tif").exists()
+    assert dsm.stat().st_size == 128 * 1024**3

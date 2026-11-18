@@ -24,12 +24,15 @@ FIELDS = [
     ("AREA_M2", "F", 24, 3),
     ("THRESH_M", "F", 24, 6),
     ("RULE", "C", 2, 0),
+    ("GND_SRC", "C", 12, 0),
+    ("WEAK_PX", "N", 20, 0),
 ]
 
 
 class VectorBuilder:
-    def __init__(self, directory: Path, transform, crs, threshold, inclusive):
+    def __init__(self, directory: Path, transform, crs, threshold, inclusive, ground_source="DEM"):
         self.directory, self.transform, self.crs = directory, transform, crs
+        self.ground_source = ground_source
         self.threshold, self.rule = threshold, ">=" if inclusive else ">"
         self.path = directory / ".vector-work.sqlite"
         self.db = sqlite3.connect(self.path)
@@ -40,7 +43,7 @@ class VectorBuilder:
             PRAGMA cache_size=-32768;
             CREATE TABLE fragments(
                 id INTEGER PRIMARY KEY, parent INTEGER, root INTEGER,
-                pixels INTEGER, lo REAL, hi REAL, total REAL, geom BLOB);
+                pixels INTEGER, lo REAL, hi REAL, total REAL, weak INTEGER, geom BLOB);
             CREATE TABLE edges(axis INTEGER, line INTEGER, side INTEGER,
                 start INTEGER, end INTEGER, fragment INTEGER);
             CREATE INDEX edge_line ON edges(axis,line,side,start);
@@ -87,7 +90,7 @@ class VectorBuilder:
                 self._join(identity, other)
             self.db.execute("INSERT INTO edges VALUES(?,?,?,?,?,?)", (axis, line, side, lo, hi, identity))
 
-    def add(self, window, selected, heights):
+    def add(self, window, selected, heights, weak=None):
         for row in range(0, selected.shape[0], TILE_SIZE):
             for col in range(0, selected.shape[1], TILE_SIZE):
                 mask = selected[row : row + TILE_SIZE, col : col + TILE_SIZE]
@@ -103,6 +106,15 @@ class VectorBuilder:
                 indices, samples = labels[mask], values[mask]
                 count = np.bincount(indices, minlength=len(geometries) + 1)
                 totals = np.bincount(indices, weights=samples, minlength=len(geometries) + 1)
+                weak_counts = (
+                    np.bincount(
+                        indices,
+                        weights=weak[row : row + TILE_SIZE, col : col + TILE_SIZE][mask],
+                        minlength=len(geometries) + 1,
+                    )
+                    if weak is not None
+                    else np.zeros(len(geometries) + 1)
+                )
                 low, high = np.full(len(count), np.inf), np.full(len(count), -np.inf)
                 np.minimum.at(low, indices, samples)
                 np.maximum.at(high, indices, samples)
@@ -116,7 +128,7 @@ class VectorBuilder:
                     self.next_id += 1
                     ids.append(identity)
                     self.db.execute(
-                        "INSERT INTO fragments VALUES(?,?,NULL,?,?,?,?,?)",
+                        "INSERT INTO fragments VALUES(?,?,NULL,?,?,?,?,?,?)",
                         (
                             identity,
                             identity,
@@ -124,6 +136,7 @@ class VectorBuilder:
                             float(low[label]),
                             float(high[label]),
                             float(totals[label]),
+                            int(weak_counts[label]),
                             to_wkb(translate(polygon, xoff=x, yoff=y)),
                         ),
                     )
@@ -167,9 +180,9 @@ class VectorBuilder:
         try:
             writer = open_part()  # Also deliver a valid empty layer when nothing qualifies.
             grouped = self.db.execute(
-                "SELECT root,SUM(pixels),MIN(lo),MAX(hi),SUM(total) FROM fragments GROUP BY root ORDER BY root"
+                "SELECT root,SUM(pixels),MIN(lo),MAX(hi),SUM(total),SUM(weak) FROM fragments GROUP BY root ORDER BY root"
             )
-            for root, pixels, low, high, total_height in grouped:
+            for root, pixels, low, high, total_height, weak_pixels in grouped:
                 merged = None
                 cursor = self.db.execute("SELECT geom FROM fragments WHERE root=? ORDER BY id", (root,))
                 while batch := cursor.fetchmany(128):
@@ -189,7 +202,8 @@ class VectorBuilder:
                     )
                 if (
                     writer.shp.tell() + record_bytes > SHAPEFILE_BYTES
-                    or writer.dbf.tell() + 200 > SHAPEFILE_BYTES
+                    or max(writer.dbf.tell(), 33 + 32 * len(FIELDS)) + 1 + sum(f[2] for f in FIELDS)
+                    > SHAPEFILE_BYTES
                 ):
                     writer.close()
                     writer = open_part()
@@ -204,6 +218,8 @@ class VectorBuilder:
                     pixels * pixel_area if pixel_area is not None else None,
                     self.threshold,
                     self.rule,
+                    self.ground_source,
+                    weak_pixels,
                 )
                 if len(sample) < 20:
                     sample.append(
@@ -219,6 +235,8 @@ class VectorBuilder:
                                     pixels * pixel_area if pixel_area is not None else None,
                                     self.threshold,
                                     self.rule,
+                                    self.ground_source,
+                                    weak_pixels,
                                 ),
                                 strict=True,
                             )
@@ -249,6 +267,8 @@ class VectorBuilder:
                         "Grid area (m2), null for geographic CRS",
                         "Height threshold (m)",
                         "Comparison operator",
+                        "Ground source: DSM_EST=estimated from DSM, DEM=external terrain",
+                        "Selected pixels with limited ground-model support; zero does not certify accuracy",
                     ],
                     strict=True,
                 )

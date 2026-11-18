@@ -21,7 +21,7 @@ from app.demo import make_demo
 from app.desktop import pick_output_directory, pick_raster
 from app.downloads import VECTOR_FILE, result_files, stream_results, vector_files
 from app.previews import build_preview
-from app.processing import ProcessingError, process_rasters
+from app.processing import ProcessingError, process_dsm, process_rasters
 from app.resources import resource_budget
 
 BASE = Path(__file__).resolve().parent
@@ -38,6 +38,9 @@ FILES = {
     "mask.png": "image/png",
     "surface.png": "image/png",
     "aoi.png": "image/png",
+    "ground.png": "image/png",
+    "ground.tif": "image/tiff",
+    "ground_quality.tif": "image/tiff",
 }
 jobs: dict[str, dict] = {}
 lock = threading.RLock()
@@ -313,13 +316,10 @@ def _run(job_id: str, directory: Path, options: dict, demo: bool = False, source
         _update(job_id, output_directory=str(output), permanent_output=destination is not None)
         if demo:
             make_demo(directory)
-        dem_input, dsm_input = sources or (directory / "dem.tif", directory / "dsm.tif")
-        report = process_rasters(
-            dem_input,
-            dsm_input,
-            output,
-            progress=lambda pct, msg: _update(job_id, progress=pct, message=msg),
-            **options,
+        inputs = sources or (directory / "dsm.tif",)
+        processor = process_dsm if len(inputs) == 1 else process_rasters
+        report = processor(
+            *inputs, output, progress=lambda pct, msg: _update(job_id, progress=pct, message=msg), **options
         )
         _update(job_id, status="complete", progress=100, message="پردازش کامل شد", result=report, demo=demo)
         with lock:
@@ -358,6 +358,29 @@ def _options(
         "dem_unit": dem_unit,
         "dsm_unit": dsm_unit,
         "resampling": resampling,
+    }
+
+
+def _dsm_options(
+    threshold, inclusive, dsm_unit, ground_profile="urban", max_object_width=200.0, ground_grid=2.0
+):
+    from app.ground import validate_options
+
+    if not math.isfinite(threshold) or threshold < 0:
+        raise HTTPException(422, "آستانه باید عددی متناهی و نامنفی بر حسب متر باشد.")
+    if dsm_unit not in ("m", "ft", "us-ft"):
+        raise HTTPException(422, "واحد ارتفاع نامعتبر است.")
+    try:
+        validate_options(ground_profile, max_object_width, ground_grid)
+    except ProcessingError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {
+        "threshold": threshold,
+        "inclusive": inclusive,
+        "dsm_unit": dsm_unit,
+        "ground_profile": ground_profile,
+        "max_object_width": max_object_width,
+        "ground_grid": ground_grid,
     }
 
 
@@ -402,9 +425,17 @@ async def create_job(
     dsm_unit: Annotated[str, Form()] = "m",
     resampling: Annotated[str, Form()] = "auto",
     same_datum: Annotated[bool, Form()] = False,
+    ground_profile: Annotated[str, Form()] = "urban",
+    max_object_width: Annotated[float, Form()] = 200.0,
+    ground_grid: Annotated[float, Form()] = 2.0,
     aoi_files: Annotated[list[UploadFile] | None, File()] = None,
 ):
-    options = _options(threshold, inclusive, dem_unit, dsm_unit, resampling, same_datum)
+    legacy = bool(dem or dem_token)
+    options = (
+        _options(threshold, inclusive, dem_unit, dsm_unit, resampling, same_datum)
+        if legacy
+        else _dsm_options(threshold, inclusive, dsm_unit, ground_profile, max_object_width, ground_grid)
+    )
     destination = None
     if output_token:
         _require_desktop(request)
@@ -412,9 +443,11 @@ async def create_job(
         if destination is None or not destination.is_dir():
             raise HTTPException(422, "پوشهٔ خروجی در دسترس نیست؛ دوباره انتخاب کنید.")
     inputs = []
-    for upload, token in ((dem, dem_token), (dsm, dsm_token)):
+    kinds = ("dem", "dsm") if legacy else ("dsm",)
+    pairs = ((dem, dem_token), (dsm, dsm_token)) if legacy else ((dsm, dsm_token),)
+    for upload, token in pairs:
         if bool(upload) == bool(token):
-            raise HTTPException(422, "برای DEM و DSM هر کدام یک فایل انتخاب کنید.")
+            raise HTTPException(422, "یک فایل DSM انتخاب کنید.")
         inputs.append(_local_path(request, token) if token else upload)
     names = tuple(
         item.name if isinstance(item, Path) else Path((item.filename or "").replace("\\", "/")).name[:180]
@@ -422,11 +455,11 @@ async def create_job(
     )
     if any(Path(name).suffix.lower() not in (".tif", ".tiff") for name in names):
         raise HTTPException(422, "فقط فایل GeoTIFF با پسوند tif یا tiff قابل استفاده است.")
-    options["filenames"] = names
+    options["filenames" if legacy else "filename"] = names if legacy else names[0]
     job_id, directory = _reserve()
     try:
         sources = []
-        for kind, item in zip(("dem", "dsm"), inputs, strict=True):
+        for kind, item in zip(kinds, inputs, strict=True):
             if isinstance(item, Path):
                 sources.append(item)
             else:
@@ -456,8 +489,8 @@ async def create_job(
 
 @app.post("/api/demo", status_code=202)
 def run_demo(request: Request, threshold: float = 30, inclusive: bool = False):
-    options = _options(threshold, inclusive, "m", "m", "auto", True)
-    options["filenames"] = ("demo_dem.tif", "demo_dsm.tif")
+    options = _dsm_options(threshold, inclusive, "m")
+    options["filename"] = "demo_dsm.tif"
     job_id, directory = _reserve()
     _update(job_id, status="queued", message="در صف پردازش")
     request.app.state.executor.submit(_run, job_id, directory, options, True)

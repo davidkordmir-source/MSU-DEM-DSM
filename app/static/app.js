@@ -2,7 +2,7 @@ import { RasterViewer } from './viewer.js';
 
 const $ = id => document.getElementById(id);
 const number = (value, digits = 1) => value == null ? '—' : new Intl.NumberFormat('fa-IR', { maximumFractionDigits: digits }).format(value);
-const files = { dem: null, dsm: null };
+const files = { dsm: null };
 let aoiFiles = [];
 let busy = false;
 let completed = false;
@@ -10,7 +10,7 @@ let desktopSession = null;
 let outputFolder = null;
 let activeInput = null;
 let lastResult = null;
-const inputPreviews = { dem: null, dsm: null };
+const inputPreviews = { dsm: null };
 const viewer = new RasterViewer($('map-canvas'), $('renderer-status'));
 
 function showError(message) {
@@ -43,9 +43,7 @@ function setFile(kind, file) {
       if (files[kind] === file && activeInput === kind) $('input-preview-status').textContent = error.message;
     });
   } else if (viewer.layer === 'input_' + kind) {
-    const other = kind === 'dem' ? 'dsm' : 'dem';
-    if (inputPreviews[other]) activateInput(other);
-    else if (lastResult) activateResult('height');
+    if (lastResult) activateResult('height');
     else {
       viewer.canvas.hidden = true;
       $('empty-state').hidden = false;
@@ -53,7 +51,7 @@ function setFile(kind, file) {
       $('input-preview-status').textContent = '';
     }
   }
-  $(`${kind}-name`).textContent = file?.name || (kind === 'dem' ? 'فایل زمین را انتخاب کنید' : 'فایل سطح را انتخاب کنید');
+  $(`${kind}-name`).textContent = file?.name || 'فایل سطح را انتخاب کنید';
   $(`${kind}-name`).dir = file ? 'auto' : 'rtl';
   $(`${kind}-size`).textContent = file ? `${number(file.size / 1024 ** 2, 2)} مگابایت · ${file.localToken ? 'خواندن مستقیم از دیسک' : 'آمادهٔ پردازش'}` : 'یا فایل را اینجا رها کنید';
   $(`${kind}-zone`).classList.toggle('has-file', !!file);
@@ -124,13 +122,13 @@ function activateResult(layer) {
     const result = lastResult.result;
     $('grid-info').textContent = result.grid.crs;
     $('map-resolution').textContent = number(result.grid.width, 0) + ' × ' + number(result.grid.height, 0) + ' پیکسل · نتیجهٔ استخراج';
-    $('viewer-status').textContent = 'ارتفاع از زمین ' + result.comparison + ' ' + number(result.threshold_m) + ' متر';
+    $('viewer-status').textContent = layer === 'ground' ? 'زمین تخمینی · ارتفاع مطلق بر حسب متر' : 'ارتفاع از زمین ' + result.comparison + ' ' + number(result.threshold_m) + ' متر';
     $('aoi-legend').hidden = !result.aoi;
     $('demo-badge').hidden = !lastResult.demo;
   }
 }
 
-for (const kind of ['dem', 'dsm']) {
+for (const kind of ['dsm']) {
   const zone = $(`${kind}-zone`);
   zone.addEventListener('click', async event => {
     if (!desktopSession || busy) return;
@@ -205,7 +203,7 @@ $('threshold').addEventListener('input', event => {
 });
 $('decrease').addEventListener('click', () => syncThreshold(Number($('threshold').value) - 1));
 $('increase').addEventListener('click', () => syncThreshold(Number($('threshold').value) + 1));
-for (const id of ['inclusive', 'dem-unit', 'dsm-unit', 'resampling', 'same-datum']) $(id).addEventListener('change', markStale);
+for (const id of ['inclusive', 'dsm-unit', 'ground-profile', 'max-object-width', 'ground-grid']) $(id).addEventListener('change', markStale);
 
 function setBusy(value) {
   busy = value;
@@ -274,14 +272,9 @@ async function run(demo = false) {
     $('threshold').focus();
     return;
   }
-  if (!demo && (!files.dem || !files.dsm)) {
-    showError('هر دو فایل DEM و DSM را انتخاب کنید.');
-    (!files.dem ? $('dem-file') : $('dsm-file')).focus();
-    return;
-  }
-  if (!demo && !$('same-datum').checked) {
-    showError('برای مقایسهٔ معتبر، یکسان بودن مبنای ارتفاعی دو فایل را تأیید کنید.');
-    $('same-datum').focus();
+  if (!demo && !files.dsm) {
+    showError('یک فایل DSM انتخاب کنید.');
+    $('dsm-file').focus();
     return;
   }
   setBusy(true);
@@ -292,18 +285,18 @@ async function run(demo = false) {
     if (demo) {
       result = await responseJSON(await fetch(`/api/demo?threshold=${encodeURIComponent(threshold)}&inclusive=${$('inclusive').checked}`, { method: 'POST' }));
     } else {
-      await Promise.all([files.dem.ready, files.dsm.ready]);
+      await files.dsm.ready;
       const form = new FormData();
-      for (const kind of ['dem', 'dsm']) {
+      for (const kind of ['dsm']) {
         if (files[kind].localToken || files[kind].inputToken) form.append(`${kind}_token`, files[kind].localToken || files[kind].inputToken);
         else form.append(kind, files[kind]);
       }
       form.append('threshold', threshold);
       form.append('inclusive', $('inclusive').checked);
-      form.append('dem_unit', $('dem-unit').value);
       form.append('dsm_unit', $('dsm-unit').value);
-      form.append('resampling', $('resampling').value);
-      form.append('same_datum', $('same-datum').checked);
+      form.append('ground_profile', $('ground-profile').value);
+      form.append('max_object_width', $('max-object-width').value);
+      form.append('ground_grid', $('ground-grid').value);
       aoiFiles.forEach(file => form.append('aoi_files', file));
       if (outputFolder) form.append('output_token', outputFolder.token);
       result = await upload(form);
@@ -336,9 +329,9 @@ async function showResult(job) {
   $('attribute-count').textContent = result.vector ? number(result.vector.feature_count, 0) + ' عارضه · نمایش حداکثر ۲۰ ردیف' : '';
   $('attribute-rows').replaceChildren(...(result.vector?.sample || []).map(row => {
     const tr = document.createElement('tr');
-    for (const name of ['OBJ_ID', 'PIXELS', 'H_MIN_M', 'H_MAX_M', 'H_MEAN_M', 'AREA_M2']) {
+    for (const name of ['OBJ_ID', 'PIXELS', 'H_MIN_M', 'H_MAX_M', 'H_MEAN_M', 'AREA_M2', 'GND_SRC', 'WEAK_PX']) {
       const td = document.createElement('td');
-      td.textContent = number(row[name], 3);
+      td.textContent = name === 'GND_SRC' ? (row[name] || '—') : number(row[name], 3);
       tr.append(td);
     }
     return tr;
@@ -352,19 +345,21 @@ async function showResult(job) {
   $('stat-mean').textContent = number(result.mean_height_m, 2);
   $('stat-duration').textContent = `پردازش در ${number(result.elapsed_seconds, 2)} ثانیه`;
   $('result-summary').textContent = `${result.comparison === '>=' ? 'بزرگ‌تر یا مساوی' : 'بزرگ‌تر از'} ${number(result.threshold_m)} متر از زمین${result.selected_pixels === 0 ? ' · هیچ پیکسلی انتخاب نشد' : ''}`;
-  for (const [id, name] of Object.entries({ all: 'results.zip', extracted: 'extracted.tif', height: 'height.tif', mask: 'mask.tif', report: 'report.json' })) {
+  for (const [id, name] of Object.entries({ all: 'results.zip', extracted: 'extracted.tif', height: 'height.tif', mask: 'mask.tif', ground: 'ground.tif', quality: 'ground_quality.tif', report: 'report.json' })) {
     $(`download-${id}`).href = `${url}/${name}`;
     $(`download-${id}`).download = name;
   }
   const entries = [
-    ['تفکیک‌پذیری DEM', resolutionLabel(result.inputs.dem)],
+    ['مبنای زمین', result.ground_estimation ? 'تخمین از DSM · نیازمند بازبینی' : 'DEM'],
     ['تفکیک‌پذیری DSM', resolutionLabel(result.inputs.dsm)],
-    ['روش تبدیل DEM', methodNames[result.resampling]],
+    ['گام مدل زمین', resolutionLabel(result.inputs.ground || result.inputs.dem)],
     ['CRS خروجی', result.grid.crs],
     ['اندازهٔ خروجی', `${number(result.grid.width, 0)} × ${number(result.grid.height, 0)}`],
     ['هسته‌های پردازشی', number(result.resources.cpu_threads, 0)],
-    ['محدودهٔ پردازش', result.aoi ? `${result.aoi.layer} · ${number(result.aoi.feature_count, 0)} عارضه` : 'کل پوشش مشترک'],
+    ['محدودهٔ پردازش', result.aoi ? `${result.aoi.layer} · ${number(result.aoi.feature_count, 0)} عارضه` : 'کل DSM'],
   ];
+  if (result.ground_estimation) entries.push(['عرض عارضه در مدل', number(result.ground_estimation.max_object_width_m) + ' متر'], ['پیکسل منتخب با پشتیبانی محدود زمین', number(result.weak_selected_pixels, 0)]);
+  for (const id of ['ground', 'quality']) $('download-' + id).hidden = !result.ground_estimation;
   if (result.aoi) entries.push(['CRS شیپ‌فایل', result.aoi.source_crs]);
   $('alignment-info').replaceChildren(...entries.flatMap(([label, value]) => {
     const dt = document.createElement('dt'), dd = document.createElement('dd');
@@ -394,12 +389,12 @@ async function showResult(job) {
   completed = true;
   // Downloads and numerical results remain usable if image loading fails.
   try {
-    await viewer.load(url);
+    await viewer.load(url, !!result.ground_estimation);
     activateResult('height');
     $('empty-state').hidden = true;
     $('map-controls').hidden = false;
     $('mask-toggle').hidden = viewer.layer === 'mask';
-    document.querySelectorAll('[data-layer]').forEach(button => { button.disabled = false; });
+    document.querySelectorAll('[data-layer]').forEach(button => { button.disabled = button.dataset.layer === 'ground' && !result.ground_estimation; });
   } catch (error) { showError(error.message); }
 }
 

@@ -109,7 +109,7 @@ def main():
     if prefix:
         environment["NSISDIR"] = str(prefix / "usr/share/nsis")
     subprocess.run([makensis, "-V2", "installer.nsi"], cwd=ROOT / "packaging", env=environment, check=True)
-    output = ROOT / "downloads/MSU-Terrain-Setup-0.4.0-x64.exe"
+    output = ROOT / "downloads/MSU-Terrain-Setup-0.5.0-x64.exe"
     digest = hashlib.sha256(output.read_bytes()).hexdigest()
     output.with_suffix(".exe.sha256").write_text(f"{digest}  {output.name}\n")
     print(json.dumps({"installer": str(output), "bytes": output.stat().st_size, "sha256": digest}))
